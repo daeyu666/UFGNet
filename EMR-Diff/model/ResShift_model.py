@@ -108,15 +108,11 @@ class ResShiftTrainer:
         self.msi_channels = int(self.data_info["n_select_bands"])
         self.state_channels = self.hsi_channels + self.msi_channels
 
-        if self.msi_channels != 8:
-            raise ValueError(
-                f"Current EMR-Diff comparison protocol requires 8 MSI bands, got {self.msi_channels}."
-            )
-
         print(
             f"[EMR-Diff] dataset={self.dataset}, HSI={self.hsi_channels}, "
             f"MSI={self.msi_channels}, state={self.state_channels}, "
-            f"scale=x{self.diffusion_sf}, degradation={self.data_info['degradation_mode']}"
+            f"scale=x{self.diffusion_sf}, degradation={self.data_info['degradation_mode']}, "
+            f"srf={self.data_info.get('srf_profile')}"
         )
 
         self._apply_dynamic_channel_config()
@@ -163,9 +159,9 @@ class ResShiftTrainer:
         return gt, lq, msi
 
     def _pseudo_msi(self, gt):
-        # Faithful generalization of the original code's gt[:, [0,1,2]] pseudo-MSI.
-        # With 8-band comparison input, use the first 8 HSI bands rather than
-        # copying HR-MSI, so the multimodal residual remains non-trivial.
+        # Faithful generalization of the original code's gt[:, [0,1,2]]
+        # pseudo-MSI. Use the same number of pseudo channels as the actual MSI
+        # profile so the diffusion state remains dimensionally consistent.
         if gt.shape[1] < self.msi_channels:
             raise ValueError(
                 f"HSI has {gt.shape[1]} bands, cannot form {self.msi_channels}-band pseudo-MSI."
