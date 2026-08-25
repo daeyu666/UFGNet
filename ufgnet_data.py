@@ -6,8 +6,12 @@ separate validation split, and reported metrics come from full-image evaluation.
 
 This module keeps the repository's user-fixed 4x Gaussian+Bicubic degradation
 and SRF observation model, while making the sampling protocol faithful to that
-setup. Requested physical SRF bands are filtered before normalization when their
-full-SRF overlap with the HSI spectral support is below the configured threshold.
+setup. For the standard 103-band Pavia University cube, the UFGNet fusion
+benchmark follows the established 93-band HMIF convention used by HySure and
+many later Pavia HSI-MSI fusion papers: the first 10 bands are removed before
+simulating the LR-HSI/HR-MSI pair. Requested physical SRF bands are filtered
+before normalization when their full-SRF overlap with the HSI spectral support
+is below the configured threshold.
 """
 
 from __future__ import annotations
@@ -29,6 +33,69 @@ from data_loader import (
     read_hsi_mat,
 )
 from srf_utils import hsi_to_msi_numpy
+
+
+PAVIA_STANDARD_BANDS = 103
+PAVIA_FUSION_BANDS = 93
+PAVIA_DROP_LEADING_BANDS = PAVIA_STANDARD_BANDS - PAVIA_FUSION_BANDS
+
+
+def _apply_ufgnet_spectral_protocol(
+    img: np.ndarray,
+    dataset_name: str,
+) -> Tuple[np.ndarray, Dict[str, object]]:
+    """Apply the spectral protocol used by the UFGNet Pavia fusion benchmark.
+
+    The standard downloadable PaviaU cube contains 103 valid channels. A large
+    body of HSI-MSI fusion work evaluates Pavia on a 93-band cube. HySure's
+    executable Pavia benchmark makes this conversion explicitly with
+    ``Z = Z(11:end,:)`` after matrix conversion, i.e. it removes the first ten
+    channels. We use that exact, reproducible convention here rather than
+    inventing a new band selector.
+
+    A preprocessed 93-band Pavia cube is accepted unchanged. Other Pavia band
+    counts are rejected so that a silent spectral remapping cannot enter a
+    formal experiment.
+    """
+    img = np.asarray(img)
+    original_bands = int(img.shape[2])
+    metadata: Dict[str, object] = {
+        "spectral_protocol": "native",
+        "original_bands": original_bands,
+        "retained_bands": original_bands,
+        "dropped_band_indices_1based": [],
+    }
+
+    if dataset_name != "PaviaU":
+        return img, metadata
+
+    if original_bands == PAVIA_STANDARD_BANDS:
+        img = np.ascontiguousarray(img[:, :, PAVIA_DROP_LEADING_BANDS:])
+        metadata.update(
+            {
+                "spectral_protocol": "paviau_hmif_103_to_93_drop_first10",
+                "retained_bands": PAVIA_FUSION_BANDS,
+                "dropped_band_indices_1based": list(
+                    range(1, PAVIA_DROP_LEADING_BANDS + 1)
+                ),
+            }
+        )
+        return img, metadata
+
+    if original_bands == PAVIA_FUSION_BANDS:
+        metadata.update(
+            {
+                "spectral_protocol": "paviau_hmif_93_preprocessed",
+                "retained_bands": PAVIA_FUSION_BANDS,
+            }
+        )
+        return img, metadata
+
+    raise ValueError(
+        "Formal PaviaU UFGNet fusion protocol expects either the standard "
+        f"{PAVIA_STANDARD_BANDS}-band cube or an already-preprocessed "
+        f"{PAVIA_FUSION_BANDS}-band cube, but got {original_bands} bands."
+    )
 
 
 def _axis_positions(length: int, patch: int, stride: int, align: int) -> List[int]:
@@ -159,10 +226,18 @@ def build_ufgnet_datasets(cfg):
     file_path = f"{cfg.data_root}/{dataset_cfg.file_name}"
 
     img = read_hsi_mat(file_path, dataset_cfg.mat_keys)
+    img, spectral_metadata = _apply_ufgnet_spectral_protocol(img, cfg.dataset)
     img = normalize_hsi(img)
     img = crop_to_scale(img, cfg.scale_ratio)
     n_bands = img.shape[2]
 
+    if spectral_metadata["spectral_protocol"] != "native":
+        print(
+            "PaviaU spectral protocol: "
+            f"{spectral_metadata['original_bands']} -> "
+            f"{spectral_metadata['retained_bands']} bands; "
+            f"mode={spectral_metadata['spectral_protocol']}"
+        )
     print(f"Loaded {cfg.dataset}: shape={img.shape}, bands={n_bands}")
     (
         srf_weights,
@@ -219,6 +294,11 @@ def build_ufgnet_datasets(cfg):
         "srf_coverage_diagnostics": coverage_diagnostics,
         "hsi_wavelengths": hsi_wavelengths,
         "sampling_protocol": "single_scene_predegraded_overlapping_patches",
+        "spectral_protocol": spectral_metadata["spectral_protocol"],
+        "original_n_bands": spectral_metadata["original_bands"],
+        "dropped_band_indices_1based": spectral_metadata[
+            "dropped_band_indices_1based"
+        ],
     }
     print(
         "UFGNet sampling protocol: full scene degraded once -> "
