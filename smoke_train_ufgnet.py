@@ -1,8 +1,8 @@
 """Short fixed-batch optimization smoke test for UFGNet.
 
 This is deliberately not a benchmark training script. It repeatedly optimizes
-one real training patch so we can verify that the exact UFGNet forward/loss
-chain is numerically trainable before launching a long scene-level run.
+one aligned real training patch sampled from the pre-simulated scene pair so we
+can verify that the exact UFGNet forward/loss chain is numerically trainable.
 
 Use --epochs as the number of smoke optimization steps, e.g. --epochs 20.
 """
@@ -14,9 +14,9 @@ import math
 import torch
 
 from config import parse_args, print_config
-from data_loader import build_loaders
 from metrics import calc_metrics
 from train_ufgnet import build_model_and_loss, resolve_device, seed_everything
+from ufgnet_data import build_ufgnet_loaders
 
 
 def _grad_norm(module: torch.nn.Module) -> float:
@@ -45,7 +45,7 @@ def main() -> None:
     seed_everything(cfg.seed)
     device = resolve_device(cfg.device)
 
-    train_loader, _, info = build_loaders(cfg)
+    train_loader, _, info = build_ufgnet_loaders(cfg)
     model, criterion, degradation = build_model_and_loss(cfg, info, device)
     optimizer = torch.optim.Adam(
         model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
