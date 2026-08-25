@@ -1,0 +1,10 @@
+# UFGNet reproduction dependencies
+# Install torch/torchvision builds matching your CUDA driver from pytorch.org.
+torch
+torchvision
+numpy
+scipy
+pandas
+h5py
+hdf5storage
+pytest
