@@ -65,15 +65,15 @@ class TrainConfig:
     freq_gamma: float = 0.5
     freq_eta: float = 0.5
 
-    # UFGNet architecture. r=5 is paper-reported Pavia optimum.
+    # UFGNet architecture. r=5 and K=7 are the paper-reported Pavia optima.
+    # The method section uses 3x3 only as an explanatory DConv sampling example.
     # The paper does not state numerical values for QIEM lambda or FASA tau;
     # they remain explicit configurable reproduction parameters here.
     ufg_rank: int = 5
     ufg_qiem_regularization: float = 1e-4
     ufg_fasa_tau: float = 1.0
     ufg_spectral_gate_kernel: int = 3
-    # Method section and Fig. 5 explicitly illustrate 3x3 DConv sampling.
-    ufg_deform_kernel_size: int = 3
+    ufg_deform_kernel_size: int = 7
 
     # Legacy loss fields kept for compatibility with older experimental scripts.
     lambda_l1: float = 1.0
@@ -232,7 +232,7 @@ def parse_args(argv: Optional[List[str]] = None):
     parser.add_argument("--ufg_qiem_regularization", type=float, default=1e-4)
     parser.add_argument("--ufg_fasa_tau", type=float, default=1.0)
     parser.add_argument("--ufg_spectral_gate_kernel", type=int, default=3)
-    parser.add_argument("--ufg_deform_kernel_size", type=int, default=3)
+    parser.add_argument("--ufg_deform_kernel_size", type=int, default=7)
 
     parser.add_argument("--save_interval", type=int, default=20)
     parser.add_argument("--eval_interval", type=int, default=1)
