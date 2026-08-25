@@ -22,7 +22,7 @@ model:
     num_res_blocks: [1,1,1,1,1]
     dims: 2
     lqrgb_channels: 0
-    rgb_channels: 8
+    rgb_channels: 0
 
 data:
   dataset: PaviaU
@@ -30,9 +30,11 @@ data:
   patch_size: 64
   stride: 32
   test_size: 128
-  msi_bands: 8
   gaussian_kernel_size: 5
   gaussian_sigma: 2.0
+  srf_band_set: auto
+  srf_min_coverage_ratio: 0.90
+  srf_coverage_policy: filter
 
 train:
   lr: 1e-4
