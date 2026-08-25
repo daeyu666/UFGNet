@@ -21,8 +21,9 @@ class SAMLoss(nn.Module):
         pred = pred.float()
         target = target.float()
         dot = torch.sum(pred * target, dim=1)
-        pred_norm = torch.sqrt(torch.sum(pred * pred, dim=1) + self.eps)
-        target_norm = torch.sqrt(torch.sum(target * target, dim=1) + self.eps)
+        # Eq. (24) places epsilon after the product of the two L2 norms.
+        pred_norm = torch.linalg.vector_norm(pred, ord=2, dim=1)
+        target_norm = torch.linalg.vector_norm(target, ord=2, dim=1)
         cos = dot / (pred_norm * target_norm + self.eps)
         cos = torch.clamp(cos, -1.0 + self.eps, 1.0 - self.eps)
         return torch.acos(cos).mean()
