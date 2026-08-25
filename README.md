@@ -24,7 +24,47 @@ python train_ufgnet.py \
   --msi_mode srf
 ```
 
-论文明确给出的默认/敏感性参数已写入配置：`r=5`、`lambda_rec=1`、`lambda_sam=1e-2`、`lambda_freq=1e-2`、`gamma=0.5`、`eta=0.5`。论文未给出 QIEM 正则系数 λ 与 FASA 温度 τ 的具体数值，因此代码将二者保留为显式可调参数 `ufg_qiem_regularization` 与 `ufg_fasa_tau`，避免把未披露数值伪装成论文设定。
+论文明确给出的默认/敏感性参数已写入配置：`r=5`、`K=7`、`lambda_rec=1`、`lambda_sam=1e-2`、`lambda_freq=1e-2`、`gamma=0.5`、`eta=0.5`。论文未给出 QIEM 正则系数 λ 与 FASA 温度 τ 的具体数值，因此代码将二者保留为显式可调参数 `ufg_qiem_regularization` 与 `ufg_fasa_tau`，避免把未披露数值伪装成论文设定。
+
+### Source-faithfulness notes
+
+当前复现对论文中存在的歧义不做静默补全：
+
+1. FGM 空间分支：Fig. 4 的示意图包含 `cos(phi)` / `sin(phi)` 卷积分支与 `atan2`，但 Algorithm 1 和 Eq. (13) 明确定义为 phase-only inverse FFT 后接 3×3 `C_phase`。当前可执行实现以 Algorithm 1 / Eq. (13) 为准，并在代码中保留该差异说明；
+2. CCRM kernel：方法部分用 3×3 kernel 说明 9 个 deformable sampling points，而参数敏感性实验明确给出最终最优 `K=7`。正式配置使用 `K=7`，单元测试仍用 `K=3` 检查论文显式给出的 18 offset + 9 mask 例子；
+3. Table III 参数量无法由论文已披露结构唯一复原。当前标准 full-channel deformable convolution 在 Pavia 上 `K=3` 为约 0.130M、`K=7` 为约 0.577M，而论文报告 0.198M。仓库保留 `audit_ufgnet.py` 显式报告该差异，不通过猜测 grouped/depthwise 结构强行凑参数量；
+4. FASA Eq. (18) 已按公式实现为 `softmax((QQ^T) * P)`，其中 `P_ij=exp(-||f_i-f_j||^2/tau)`；SAM Eq. (24) 的 epsilon 仅加在两项 L2 范数乘积之后。
+
+### Reproduction sanity checks
+
+CPU CI 当前检查：
+
+```text
+11 tests passed
+```
+
+覆盖退化终点闭合、数据端退化一致性、完整 UFGNet 前向、无监督 loss backward、FASA Eq. (18) 等。后续新增的 SAM Eq. (24) 检查也由 CI 持续验证。
+
+真实 HSI 长训练前先运行：
+
+```bash
+python sanity_check_ufgnet.py \
+  --dataset PaviaU \
+  --scale_ratio 4 \
+  --degradation_mode gaussian_bicubic \
+  --msi_mode srf \
+  --device cuda
+```
+
+该脚本执行 1 个真实训练 batch 的完整前向/反向，并打印 QIEM、FGM、CCRM 中间量、FASA 行和、offset/mask、各损失项、各模块梯度范数、参数量以及 6 个 GT 监控指标。GT 仅用于监控，不进入无监督训练 loss。
+
+参数量审计：
+
+```bash
+python audit_ufgnet.py
+```
+
+依赖列表见 `requirements-ufgnet.txt`。实际 GPU 训练建议安装与 CUDA 匹配的 `torchvision`，优先使用其原生 modulated deformable convolution；仓库同时保留纯 PyTorch bilinear `grid_sample` fallback 用于可移植性检查。
 
 ## 当前代码
 
@@ -35,10 +75,13 @@ python train_ufgnet.py \
 | `check_degradation_trajectory.py` | 在接网络前检查各时间步退化状态 |
 | `models/ufgnet.py` | UFGNet：QIEM、FGM、CCRM、SpeDOB、SpaDOB、FASA |
 | `train_ufgnet.py` | UFGNet 无监督训练与全参考指标监控 |
+| `sanity_check_ufgnet.py` | 真实数据单 batch 前向/反向诊断 |
+| `audit_ufgnet.py` | 论文 Table III 参数量对照与结构歧义审计 |
 | `losses.py` | SAMLoss 与 UFGNet 三项无监督复合损失 |
 | `metrics.py` | PSNR / RMSE / SAM / ERGAS / SSIM / CC |
 | `srf_utils.py` | SRF 加载、插值、离散积分权重、HSI→MSI |
 | `config.py` | 数据、退化、UFGNet 与训练配置 |
+| `requirements-ufgnet.txt` | UFGNet 复现依赖 |
 | `main.py` | 检查数据与退化配置是否正确串联 |
 
 ## Degradation v1
@@ -198,4 +241,4 @@ python main.py \
 
 ## 当前阶段
 
-UFGNet 网络、损失和训练入口已接入；下一步是在真实 HSI 数据上执行前向/反向 sanity check、参数量核对和首轮 4× Gaussian+Bicubic 训练。Physical 与 diffusion 路线保留作为后续扩展，不混入当前 UFGNet 仿真基线。
+UFGNet 网络、损失、训练入口、自动化单元测试、参数量审计和真实数据单 batch sanity script 均已接入。CPU synthetic CI 已通过；下一步是在真实 HSI 数据上执行 `sanity_check_ufgnet.py`，确认中间量和梯度正常后再启动首轮 4× Gaussian+Bicubic 长训练。Physical 与 diffusion 路线保留作为后续扩展，不混入当前 UFGNet 仿真基线。
