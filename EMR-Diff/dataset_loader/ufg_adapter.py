@@ -36,12 +36,49 @@ def build_ufg_loaders(configs):
     # full-SRF coverage protection before normalization.
     cfg.msi_mode = "srf"
     cfg.srf_band_set = str(configs.data.get("srf_band_set", "auto"))
-    cfg.srf_path = str(configs.data.get("srf_path", ""))
-    cfg.wavelength_path = str(configs.data.get("wavelength_path", ""))
     cfg.srf_min_coverage_ratio = float(
         configs.data.get("srf_min_coverage_ratio", 0.90)
     )
     cfg.srf_coverage_policy = str(configs.data.get("srf_coverage_policy", "filter"))
+
+    # EMR-Diff is normally launched from its own subdirectory, so use absolute
+    # repository paths for the shared SRF and wavelength files.
+    cfg.wavelength_root = os.path.join(REPO_ROOT, "data", "wavelengths")
+    explicit_wavelength = str(configs.data.get("wavelength_path", ""))
+    if explicit_wavelength:
+        cfg.wavelength_path = (
+            explicit_wavelength
+            if os.path.isabs(explicit_wavelength)
+            else os.path.abspath(os.path.join(EMR_ROOT, explicit_wavelength))
+        )
+    elif cfg.dataset == "PaviaU" and cfg.srf_band_set in {"auto", "ikonos4"}:
+        cfg.wavelength_path = os.path.join(
+            REPO_ROOT, "data", "wavelengths", "PaviaU_nominal_430_860.txt"
+        )
+    else:
+        cfg.wavelength_path = ""
+
+    explicit_srf = str(configs.data.get("srf_path", ""))
+    if explicit_srf:
+        cfg.srf_path = (
+            explicit_srf
+            if os.path.isabs(explicit_srf)
+            else os.path.abspath(os.path.join(EMR_ROOT, explicit_srf))
+        )
+    else:
+        resolved = (
+            "ikonos4"
+            if cfg.srf_band_set == "auto" and cfg.dataset == "PaviaU"
+            else "wv2_all8"
+            if cfg.srf_band_set == "auto"
+            else cfg.srf_band_set
+        )
+        filename = (
+            "ikonos_relative_spectral_response.csv"
+            if resolved == "ikonos4"
+            else "wv2_relative_spectral_response_data_for_i.atcorr.csv"
+        )
+        cfg.srf_path = os.path.join(REPO_ROOT, "data", "srf", filename)
 
     cfg.batch_size = int(configs.train.get("batch", [1, 1])[0])
     cfg.num_workers = int(configs.train.get("num_workers", 0))
