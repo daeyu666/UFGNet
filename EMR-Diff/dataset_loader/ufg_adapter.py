@@ -8,11 +8,17 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from config import TrainConfig, get_dataset_configs, resolve_config_defaults, validate_config
-from data_loader import build_loaders
+from ufgnet_data import build_ufgnet_loaders
 
 
 def build_ufg_loaders(configs):
-    """Build EMR-Diff dataloaders from the shared UFGNet observation protocol."""
+    """Build EMR-Diff dataloaders from the shared UFGNet observation protocol.
+
+    This intentionally reuses ``build_ufgnet_loaders`` rather than the legacy
+    generic loader so all compared methods see the same single pre-simulated
+    LR-HSI/HR-MSI pair, overlapping patches, full-scene evaluation, and the
+    same PaviaU 103->93 HMIF spectral preprocessing.
+    """
     cfg = TrainConfig()
     cfg.datasets = get_dataset_configs()
 
@@ -51,11 +57,10 @@ def build_ufg_loaders(configs):
             if os.path.isabs(explicit_wavelength)
             else os.path.abspath(os.path.join(EMR_ROOT, explicit_wavelength))
         )
-    elif cfg.dataset == "PaviaU" and cfg.srf_band_set in {"auto", "ikonos4"}:
-        cfg.wavelength_path = os.path.join(
-            REPO_ROOT, "data", "wavelengths", "PaviaU_nominal_430_860.txt"
-        )
     else:
+        # Leave empty so the shared UFGNet loader resolves the formal profile.
+        # For PaviaU after 103->93 preprocessing this becomes the benchmark
+        # nominal 430-860 nm / 93-band IKONOS mapping.
         cfg.wavelength_path = ""
 
     explicit_srf = str(configs.data.get("srf_path", ""))
@@ -87,6 +92,6 @@ def build_ufg_loaders(configs):
     resolve_config_defaults(cfg)
     validate_config(cfg)
 
-    train_loader, test_loader, info = build_loaders(cfg)
+    train_loader, test_loader, info = build_ufgnet_loaders(cfg)
     cfg.n_select_bands = int(info["n_select_bands"])
     return train_loader, test_loader, info, cfg
