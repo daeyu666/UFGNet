@@ -11,7 +11,7 @@ class DatasetConfig:
     name: str
     file_name: str
     mat_keys: list
-    n_select_bands: int = 5
+    n_select_bands: int = 8
 
 
 @dataclass
@@ -35,29 +35,29 @@ class TrainConfig:
     patch_size: int = 64
     stride: int = 32
     scale_ratio: int = 4
-    n_select_bands: int = 5
+    n_select_bands: int = 8
 
     # --- LR-HSI 退化 ---
-    # 新实验默认使用物理退化；旧 make_lr_hsi() 函数仍保留 legacy 默认行为。
-    degradation_mode: str = "physical"  # bicubic / gaussian_bicubic / physical
-    degradation_sigma: float = 2.0       # gaussian_bicubic legacy sigma
-    degradation_kernel_size: int = 5     # gaussian_bicubic legacy kernel
-    mtf_nyquist: float = 0.2             # physical Gaussian PSF target MTF@LR Nyquist
+    # 当前对比实验默认使用常规退化：5x5 Gaussian(sigma=2) + Bicubic x4。
+    degradation_mode: str = "gaussian_bicubic"  # bicubic / gaussian_bicubic / physical
+    degradation_sigma: float = 2.0
+    degradation_kernel_size: int = 5
+    mtf_nyquist: float = 0.2
     psf_truncate: float = 3.0
 
     # --- 渐进退化 ---
     progressive_steps: int = 12
-    progressive_lift: str = "auto"       # auto -> physical: normalized_adjoint, ordinary: bilinear
+    progressive_lift: str = "auto"
     boundary_probability: float = 0.2
     boundary_radius: int = 1
 
     # --- MSI 生成模式 ---
-    msi_mode: str = "uniform"          # "uniform" 或 "srf"
+    msi_mode: str = "uniform"
     srf_path: str = "./data/srf/wv2_relative_spectral_response_data_for_i.atcorr.csv"
     wavelength_root: str = "./data/wavelengths"
     wavelength_path: str = ""
-    srf_interp: str = "pchip"          # "pchip" 或 "linear"
-    srf_band_set: str = "wv2_all8" # "wv2_visible5" / "wv2_visible6" / "wv2_all8"
+    srf_interp: str = "pchip"
+    srf_band_set: str = "wv2_all8"
 
     # --- 训练 ---
     epochs: int = 300
@@ -88,9 +88,6 @@ class TrainConfig:
     datasets: dict = field(default_factory=dict)
 
 
-# ---------------------------------------------------------------------------
-# 默认数据集配置
-# ---------------------------------------------------------------------------
 def get_dataset_configs():
     return {
         "PaviaU": DatasetConfig(
@@ -152,34 +149,27 @@ def validate_config(cfg: TrainConfig):
         )
 
 
-# ---------------------------------------------------------------------------
-# 命令行参数解析
-# ---------------------------------------------------------------------------
 def parse_args(argv: Optional[List[str]] = None):
     parser = argparse.ArgumentParser(description="HSI Super-Resolution Template")
 
-    # --- 运行控制 ---
     parser.add_argument("--stage", type=str, default="train")
     parser.add_argument("--dataset", type=str, default="PaviaU")
 
-    # --- 路径 ---
     parser.add_argument("--data_root", type=str, default="./data/raw")
     parser.add_argument("--checkpoint_root", type=str, default="./checkpoints")
     parser.add_argument("--log_root", type=str, default="./logs")
     parser.add_argument("--output_root", type=str, default="./outputs")
 
-    # --- 数据 ---
     parser.add_argument("--image_size", type=int, default=128)
     parser.add_argument("--patch_size", type=int, default=64)
     parser.add_argument("--stride", type=int, default=32)
     parser.add_argument("--scale_ratio", type=int, default=4)
-    parser.add_argument("--n_select_bands", type=int, default=5)
+    parser.add_argument("--n_select_bands", type=int, default=8)
 
-    # --- LR-HSI 退化 ---
     parser.add_argument(
         "--degradation_mode",
         type=str,
-        default="physical",
+        default="gaussian_bicubic",
         choices=["bicubic", "gaussian_bicubic", "physical"],
     )
     parser.add_argument("--degradation_sigma", type=float, default=2.0)
@@ -187,7 +177,6 @@ def parse_args(argv: Optional[List[str]] = None):
     parser.add_argument("--mtf_nyquist", type=float, default=0.2)
     parser.add_argument("--psf_truncate", type=float, default=3.0)
 
-    # --- 渐进退化 ---
     parser.add_argument("--progressive_steps", type=int, default=12)
     parser.add_argument(
         "--progressive_lift",
@@ -198,7 +187,6 @@ def parse_args(argv: Optional[List[str]] = None):
     parser.add_argument("--boundary_probability", type=float, default=0.2)
     parser.add_argument("--boundary_radius", type=int, default=1)
 
-    # --- MSI 生成 ---
     parser.add_argument(
         "--msi_mode", type=str, default="uniform", choices=["uniform", "srf"]
     )
@@ -219,7 +207,6 @@ def parse_args(argv: Optional[List[str]] = None):
         choices=["wv2_visible5", "wv2_visible6", "wv2_all8"],
     )
 
-    # --- 训练 ---
     parser.add_argument("--epochs", type=int, default=300)
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--num_workers", type=int, default=0)
@@ -228,7 +215,6 @@ def parse_args(argv: Optional[List[str]] = None):
     parser.add_argument("--seed", type=int, default=10)
     parser.add_argument("--device", type=str, default="cuda")
 
-    # --- 损失权重 ---
     parser.add_argument("--lambda_l1", type=float, default=1.0)
     parser.add_argument("--lambda_sam", type=float, default=0.1)
     parser.add_argument("--lambda_dc", type=float, default=0.1)
@@ -238,7 +224,6 @@ def parse_args(argv: Optional[List[str]] = None):
     parser.add_argument("--lambda_srf_region", type=float, default=0.3)
     parser.add_argument("--lambda_mse", type=float, default=1.0)
 
-    # --- 保存 / 恢复 ---
     parser.add_argument("--save_interval", type=int, default=20)
     parser.add_argument("--eval_interval", type=int, default=1)
     parser.add_argument("--resume", type=str, default="")
@@ -262,9 +247,6 @@ def parse_args(argv: Optional[List[str]] = None):
     return cfg
 
 
-# ---------------------------------------------------------------------------
-# 目录创建
-# ---------------------------------------------------------------------------
 def make_dirs(cfg: TrainConfig):
     dirs = [
         cfg.checkpoint_root,
@@ -278,9 +260,6 @@ def make_dirs(cfg: TrainConfig):
         os.makedirs(path, exist_ok=True)
 
 
-# ---------------------------------------------------------------------------
-# 辅助函数
-# ---------------------------------------------------------------------------
 def get_checkpoint_path(cfg: TrainConfig, stage: str = None, name: str = None):
     stage = stage or cfg.stage
     if name is None or name == "":
