@@ -181,7 +181,7 @@ def _integrate_piecewise_linear(
     inside = (x > lo) & (x < hi)
     xi = np.concatenate(([lo], x[inside], [hi]))
     yi = np.interp(xi, x, y)
-    return float(np.trapz(yi, xi))
+    return float(np.trapezoid(yi, xi))
 
 
 def compute_srf_coverage_ratios(
