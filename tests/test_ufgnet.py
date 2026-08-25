@@ -47,7 +47,10 @@ def test_fasa_matches_paper_equation_18():
     f = guidance.mean(dim=(-2, -1))
     dist2 = (f.unsqueeze(2) - f.unsqueeze(1)).pow(2)
     physical_prior = torch.exp(-dist2 / tau)
-    expected = torch.softmax(correlation * physical_prior, dim=-1)
+
+    # Eq. (18): exp(correlation) * P, normalized across j.
+    numerator = torch.exp(correlation) * physical_prior
+    expected = numerator / numerator.sum(dim=-1, keepdim=True)
 
     assert torch.allclose(affinity, expected, atol=1e-6, rtol=1e-6)
 
