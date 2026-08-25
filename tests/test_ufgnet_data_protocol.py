@@ -17,9 +17,25 @@ def _normalized_srf(msi_channels: int, hsi_channels: int) -> torch.Tensor:
     return srf / srf.sum(dim=1, keepdim=True).clamp_min(1e-8)
 
 
-def test_pavia_standard_103_is_converted_to_hmif_93():
+def test_pavia_standard_103_is_kept_in_native103_mode():
     img = np.arange(2 * 3 * 103, dtype=np.float32).reshape(2, 3, 103)
-    out, meta = _apply_ufgnet_spectral_protocol(img, "PaviaU")
+    out, meta = _apply_ufgnet_spectral_protocol(
+        img, "PaviaU", protocol="native103"
+    )
+
+    assert out.shape == img.shape
+    assert np.array_equal(out, img)
+    assert meta["spectral_protocol"] == "paviau_native_103"
+    assert meta["original_bands"] == 103
+    assert meta["retained_bands"] == 103
+    assert meta["dropped_band_indices_1based"] == []
+
+
+def test_pavia_standard_103_can_be_converted_to_fusion93():
+    img = np.arange(2 * 3 * 103, dtype=np.float32).reshape(2, 3, 103)
+    out, meta = _apply_ufgnet_spectral_protocol(
+        img, "PaviaU", protocol="fusion93"
+    )
 
     assert out.shape == (2, 3, 93)
     assert np.array_equal(out, img[:, :, 10:])
@@ -29,21 +45,32 @@ def test_pavia_standard_103_is_converted_to_hmif_93():
     assert meta["dropped_band_indices_1based"] == list(range(1, 11))
 
 
-def test_pavia_preprocessed_93_is_kept_and_unexpected_count_rejected():
+def test_pavia_preprocessed_93_is_only_accepted_in_fusion93_mode():
     img93 = np.zeros((2, 3, 93), dtype=np.float32)
-    out, meta = _apply_ufgnet_spectral_protocol(img93, "PaviaU")
+    out, meta = _apply_ufgnet_spectral_protocol(
+        img93, "PaviaU", protocol="fusion93"
+    )
     assert out.shape == img93.shape
     assert meta["spectral_protocol"] == "paviau_hmif_93_preprocessed"
 
     with pytest.raises(ValueError):
         _apply_ufgnet_spectral_protocol(
-            np.zeros((2, 3, 102), dtype=np.float32), "PaviaU"
+            img93, "PaviaU", protocol="native103"
+        )
+
+    with pytest.raises(ValueError):
+        _apply_ufgnet_spectral_protocol(
+            np.zeros((2, 3, 102), dtype=np.float32),
+            "PaviaU",
+            protocol="fusion93",
         )
 
 
 def test_non_pavia_spectral_protocol_is_native():
     img = np.zeros((2, 3, 128), dtype=np.float32)
-    out, meta = _apply_ufgnet_spectral_protocol(img, "Chikusei")
+    out, meta = _apply_ufgnet_spectral_protocol(
+        img, "Chikusei", protocol="native103"
+    )
     assert out.shape == img.shape
     assert meta["spectral_protocol"] == "native"
 
