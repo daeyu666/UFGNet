@@ -5,7 +5,9 @@ overlapping patches are then sampled from that paired observation without a
 separate validation split, and reported metrics come from full-image evaluation.
 
 This module keeps the repository's user-fixed 4x Gaussian+Bicubic degradation
-and existing SRF, while making the sampling protocol faithful to that setup.
+and SRF observation model, while making the sampling protocol faithful to that
+setup. Requested physical SRF bands are filtered before normalization when their
+full-SRF overlap with the HSI spectral support is below the configured threshold.
 """
 
 from __future__ import annotations
@@ -162,9 +164,13 @@ def build_ufgnet_datasets(cfg):
     n_bands = img.shape[2]
 
     print(f"Loaded {cfg.dataset}: shape={img.shape}, bands={n_bands}")
-    srf_weights, srf_band_names, hsi_wavelengths, n_select_bands = _build_srf(
-        cfg, n_bands
-    )
+    (
+        srf_weights,
+        srf_band_names,
+        hsi_wavelengths,
+        n_select_bands,
+        coverage_diagnostics,
+    ) = _build_srf(cfg, n_bands)
     if srf_weights is None:
         raise RuntimeError("UFGNet reproduction requires msi_mode='srf'.")
 
@@ -210,6 +216,7 @@ def build_ufgnet_datasets(cfg):
         "msi_mode": getattr(cfg, "msi_mode", "uniform"),
         "srf_weights": srf_weights,
         "srf_band_names": srf_band_names,
+        "srf_coverage_diagnostics": coverage_diagnostics,
         "hsi_wavelengths": hsi_wavelengths,
         "sampling_protocol": "single_scene_predegraded_overlapping_patches",
     }
