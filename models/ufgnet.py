@@ -7,6 +7,12 @@ Implements:
 
 The spatial degradation operator is injected at forward time so the network can reuse
 exactly the same Gaussian+Bicubic operator that generated the LR-HSI observations.
+
+Source-faithfulness note:
+Fig. 4 schematically draws a phase-domain cosine/sine convolution block, while
+Algorithm 1 and Eq. (13) explicitly define phase-only inverse FFT followed by a
+3x3 C_phase mapping. The executable baseline follows the explicit algorithm/equation
+rather than silently inventing an undocumented fusion of the two descriptions.
 """
 
 from __future__ import annotations
@@ -135,8 +141,8 @@ class FrequencyGuidedModule(nn.Module):
         # Paper states b in R^Ch, so keep an explicit per-frequency learnable bias.
         self.amplitude_bias = nn.Parameter(torch.zeros(1, 1, hsi_channels))
 
-        # C_phase in Eq. (13) is a 3x3 mapping applied band-by-band.  A shared
-        # 1->1 convolution matches the paper's per-band procedural description.
+        # Algorithm 1 / Eq. (13): phase-only inverse FFT then a 3x3 C_phase.
+        # It is applied band-by-band, so the same 1->1 mapping is shared over bands.
         self.phase_mapping = nn.Conv2d(1, 1, kernel_size=3, padding=1)
 
     def _spectral_branch(self, z: torch.Tensor) -> torch.Tensor:
@@ -172,7 +178,7 @@ class FrequencyGuidedModule(nn.Module):
 
 
 class FrequencyAwareSpectralAttention(nn.Module):
-    """FASA used by SpeDOB, corresponding to Eqs. (17)-(19)."""
+    """FASA used by SpeDOB, corresponding exactly to Eqs. (17)-(19)."""
 
     def __init__(self, channels: int, tau: float = 1.0) -> None:
         super().__init__()
@@ -188,16 +194,24 @@ class FrequencyAwareSpectralAttention(nn.Module):
         b, c, h, w = spectral_residual.shape
         q = spectral_residual.reshape(b, c, h * w)
 
-        # Data-driven spatial correlation QQ^T.
+        # Data-driven term QQ^T in Eq. (18).
         correlation = torch.matmul(q, q.transpose(1, 2))
 
-        # f in R^Ch: global pooling of F_spe over the spatial lattice.
+        # Eq. (17): P_ij = exp(-||f_i-f_j||_2^2 / tau), where f is obtained
+        # by global spatial pooling of F_spe.  For scalar per-band pooled values,
+        # ||f_i-f_j||_2^2 reduces to the squared scalar difference.
         f = spectral_guidance.mean(dim=(-2, -1))
         dist2 = (f.unsqueeze(2) - f.unsqueeze(1)).pow(2)
-        # Eq. (18): exp(correlation) * exp(-dist2/tau), implemented in
-        # log-space before softmax for numerical stability.
-        affinity = torch.softmax(correlation - dist2 / self.tau, dim=-1)
+        physical_prior = torch.exp(-dist2 / self.tau)
 
+        # Eq. (18) places the product (Q_i Q_j^T) * P_ij INSIDE the exponent.
+        # Therefore the correct numerically-stable implementation is simply a
+        # softmax over correlation * physical_prior, not softmax(log-correlation
+        # plus log-prior) and not exp(correlation) * P_ij.
+        fused_similarity = correlation * physical_prior
+        affinity = torch.softmax(fused_similarity, dim=-1)
+
+        # Eq. (19): Conv_1x1(R_spe odot Sigmoid((M R_spe^T)^T)).
         aggregated = torch.matmul(affinity, q).reshape(b, c, h, w)
         gated = spectral_residual * torch.sigmoid(aggregated)
         z2 = self.scale_recovery(gated)
@@ -267,7 +281,7 @@ def _fallback_modulated_deform_conv2d(
 class SpatialDifferentialOptimizationBranch(nn.Module):
     """SpaDOB with F_spa-driven modulated deformable convolution."""
 
-    def __init__(self, channels: int, kernel_size: int = 3) -> None:
+    def __init__(self, channels: int, kernel_size: int = 7) -> None:
         super().__init__()
         if kernel_size < 1 or kernel_size % 2 == 0:
             raise ValueError("kernel_size must be a positive odd integer")
@@ -276,7 +290,8 @@ class SpatialDifferentialOptimizationBranch(nn.Module):
         self.padding = kernel_size // 2
         k_total = kernel_size * kernel_size
 
-        # C_offset itself is explicitly 3x3 in Eq. (20).
+        # C_offset itself is explicitly 3x3 in Eq. (20).  Its OUTPUT dimensionality
+        # is 3*K_total: 2*K_total offsets plus K_total modulation masks.
         self.offset_estimator = nn.Conv2d(
             channels, 3 * k_total, kernel_size=3, padding=1
         )
@@ -324,7 +339,7 @@ class CrossComplementaryRefinementModule(nn.Module):
         self,
         hsi_channels: int,
         fasa_tau: float = 1.0,
-        deform_kernel_size: int = 3,
+        deform_kernel_size: int = 7,
     ) -> None:
         super().__init__()
         self.spe_dob = FrequencyAwareSpectralAttention(hsi_channels, tau=fasa_tau)
@@ -342,7 +357,9 @@ class CrossComplementaryRefinementModule(nn.Module):
         srf: torch.Tensor,
         degradation_operator: nn.Module,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-        # Eq. (15): R_spe = U_spa(X - D_spa(Z1)); U_spa is bicubic.
+        # Eq. (15): R_spe = U_spa(X - D_spa(Z1)); paper explicitly gives
+        # bicubic as the simple U_spa example. D_spa itself is the exact same
+        # injected Gaussian+Bicubic observation operator used to generate X.
         degraded_z1 = degradation_operator.degrade(z1)
         lr_residual = lr_hsi - degraded_z1
         r_spe = F.interpolate(
@@ -386,7 +403,7 @@ class UFGNet(nn.Module):
         qiem_regularization: float = 1e-4,
         fasa_tau: float = 1.0,
         spectral_gate_kernel: int = 3,
-        deform_kernel_size: int = 3,
+        deform_kernel_size: int = 7,
     ) -> None:
         super().__init__()
         srf = torch.as_tensor(srf, dtype=torch.float32)
