@@ -24,26 +24,26 @@ python train_ufgnet.py \
   --msi_mode srf
 ```
 
-论文明确给出的默认/敏感性参数已写入配置：`r=5`、`K=7`、`lambda_rec=1`、`lambda_sam=1e-2`、`lambda_freq=1e-2`、`gamma=0.5`、`eta=0.5`。论文未给出 QIEM 正则系数 λ 与 FASA 温度 τ 的具体数值，因此代码将二者保留为显式可调参数 `ufg_qiem_regularization` 与 `ufg_fasa_tau`，避免把未披露数值伪装成论文设定。
+论文明确支持并已写入配置的参数包括：`r=5`、`lambda_rec=1`、`lambda_sam=1e-2`、`lambda_freq=1e-2`、`gamma=0.5`、`eta=0.5`、Adam 初始学习率 `5e-4` 与 batch size `1`。论文未给出 QIEM 正则系数 λ 与 FASA 温度 τ 的具体数值，因此代码将二者保留为显式可调参数 `ufg_qiem_regularization` 与 `ufg_fasa_tau`，避免把未披露数值伪装成论文设定。
 
 ### Source-faithfulness notes
 
 当前复现对论文中存在的歧义不做静默补全：
 
 1. FGM 空间分支：Fig. 4 的示意图包含 `cos(phi)` / `sin(phi)` 卷积分支与 `atan2`，但 Algorithm 1 和 Eq. (13) 明确定义为 phase-only inverse FFT 后接 3×3 `C_phase`。当前可执行实现以 Algorithm 1 / Eq. (13) 为准，并在代码中保留该差异说明；
-2. CCRM kernel：方法部分用 3×3 kernel 说明 9 个 deformable sampling points，而参数敏感性实验明确给出最终最优 `K=7`。正式配置使用 `K=7`，单元测试仍用 `K=3` 检查论文显式给出的 18 offset + 9 mask 例子；
-3. Table III 参数量无法由论文已披露结构唯一复原。当前标准 full-channel deformable convolution 在 Pavia 上 `K=3` 为约 0.130M、`K=7` 为约 0.577M，而论文报告 0.198M。仓库保留 `audit_ufgnet.py` 显式报告该差异，不通过猜测 grouped/depthwise 结构强行凑参数量；
+2. CCRM 中符号 `K` 被论文重复用于不兼容的含义。Eq. (20) 明确定义 `K` 为**采样元素总数**，并给出“3×3 kernel 时 K=9”；参数敏感性部分又将 `K` 称为**kernel size**，讨论 K=3、7、9 并报告 K=7 最优。由于该表述无法唯一映射为标准二维 deformable-convolution kernel，当前正式配置保留方法部分明确画出的 3×3 DConv，而不擅自把敏感性中的 K=7 解释成 7×7 DConv；
+3. Table III 参数量无法由论文已披露结构唯一复原。当前标准 full-channel 3×3 deformable convolution 在 Pavia 上约 0.130M，而论文报告 0.198M；若将敏感性 K=7 直接解释成 7×7 DConv，则会上升到约 0.577M，反而明显偏离论文参数量。仓库保留 `audit_ufgnet.py` 显式报告该差异，不通过猜测 grouped/depthwise 结构强行凑参数量；
 4. FASA Eq. (18) 已按公式实现为 `softmax((QQ^T) * P)`，其中 `P_ij=exp(-||f_i-f_j||^2/tau)`；SAM Eq. (24) 的 epsilon 仅加在两项 L2 范数乘积之后。
 
 ### Reproduction sanity checks
 
-CPU CI 当前检查：
+CPU CI 当前检查结果：
 
 ```text
-11 tests passed
+12 tests passed
 ```
 
-覆盖退化终点闭合、数据端退化一致性、完整 UFGNet 前向、无监督 loss backward、FASA Eq. (18) 等。后续新增的 SAM Eq. (24) 检查也由 CI 持续验证。
+覆盖退化终点闭合、数据端退化一致性、完整 UFGNet 前向、无监督 loss backward、FASA Eq. (18)、SAM Eq. (24) 等。
 
 真实 HSI 长训练前先运行：
 
