@@ -9,6 +9,8 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: ${{ github.workspace }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -22,3 +24,6 @@ jobs:
       - name: Run degradation and UFGNet tests
         run: |
           pytest -q tests/test_degradation_closure.py tests/test_data_pipeline_degradation.py tests/test_ufgnet.py
+      - name: Audit UFGNet parameter counts
+        run: |
+          python audit_ufgnet.py
