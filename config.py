@@ -7,7 +7,6 @@ from typing import List, Optional
 
 @dataclass
 class DatasetConfig:
-    """单个数据集的配置信息。"""
     name: str
     file_name: str
     mat_keys: list
@@ -16,9 +15,6 @@ class DatasetConfig:
 
 @dataclass
 class TrainConfig:
-    """通用训练配置，不依赖具体模型结构。"""
-
-    # --- 路径 ---
     project_root: str = "."
     data_root: str = "./data/raw"
     cache_root: str = "./data/cache"
@@ -26,51 +22,61 @@ class TrainConfig:
     log_root: str = "./logs"
     output_root: str = "./outputs"
 
-    # --- 运行阶段 ---
     stage: str = "train"
     dataset: str = "PaviaU"
 
-    # --- 数据 ---
     image_size: int = 128
     patch_size: int = 64
     stride: int = 32
     scale_ratio: int = 4
     n_select_bands: int = 5
 
-    # --- LR-HSI 退化 ---
-    # 新实验默认使用物理退化；旧 make_lr_hsi() 函数仍保留 legacy 默认行为。
-    degradation_mode: str = "physical"  # bicubic / gaussian_bicubic / physical
-    degradation_sigma: float = 2.0       # gaussian_bicubic legacy sigma
-    degradation_kernel_size: int = 5     # gaussian_bicubic legacy kernel
-    mtf_nyquist: float = 0.2             # physical Gaussian PSF target MTF@LR Nyquist
+    # User-fixed first-stage UFGNet reproduction protocol.
+    degradation_mode: str = "gaussian_bicubic"
+    degradation_sigma: float = 2.0
+    degradation_kernel_size: int = 5
+    mtf_nyquist: float = 0.2
     psf_truncate: float = 3.0
 
-    # --- 渐进退化 ---
     progressive_steps: int = 12
-    progressive_lift: str = "auto"       # auto -> physical: normalized_adjoint, ordinary: bilinear
+    progressive_lift: str = "auto"
     boundary_probability: float = 0.2
     boundary_radius: int = 1
 
-    # --- MSI 生成模式 ---
-    msi_mode: str = "uniform"          # "uniform" 或 "srf"
+    msi_mode: str = "srf"
     srf_path: str = "./data/srf/wv2_relative_spectral_response_data_for_i.atcorr.csv"
     wavelength_root: str = "./data/wavelengths"
     wavelength_path: str = ""
-    srf_interp: str = "pchip"          # "pchip" 或 "linear"
-    srf_band_set: str = "wv2_visible6" # "wv2_visible5" / "wv2_visible6" / "wv2_all8"
+    srf_interp: str = "pchip"
+    srf_band_set: str = "wv2_visible6"
 
-    # --- 训练 ---
     epochs: int = 300
-    batch_size: int = 4
+    batch_size: int = 1
     num_workers: int = 0
-    lr: float = 1e-4
+    lr: float = 5e-4
     weight_decay: float = 0.0
     seed: int = 10
     device: str = "cuda"
 
-    # --- 损失权重 ---
+    # UFGNet loss, from the paper sensitivity analysis.
+    lambda_rec: float = 1.0
+    lambda_sam: float = 1e-2
+    lambda_freq: float = 1e-2
+    freq_gamma: float = 0.5
+    freq_eta: float = 0.5
+
+    # UFGNet architecture. r=5 is paper-reported Pavia optimum.
+    # The paper does not state numerical values for QIEM lambda or FASA tau;
+    # they remain explicit configurable reproduction parameters here.
+    ufg_rank: int = 5
+    ufg_qiem_regularization: float = 1e-4
+    ufg_fasa_tau: float = 1.0
+    ufg_spectral_gate_kernel: int = 3
+    # Method section and Fig. 5 explicitly illustrate 3x3 DConv sampling.
+    ufg_deform_kernel_size: int = 3
+
+    # Legacy loss fields kept for compatibility with older experimental scripts.
     lambda_l1: float = 1.0
-    lambda_sam: float = 0.1
     lambda_dc: float = 0.1
     lambda_sgrad: float = 0.05
     lambda_sdir: float = 0.2
@@ -78,19 +84,14 @@ class TrainConfig:
     lambda_srf_region: float = 0.3
     lambda_mse: float = 1.0
 
-    # --- 保存 / 恢复 ---
     save_interval: int = 20
     eval_interval: int = 1
     resume: str = ""
     save_name: str = ""
 
-    # --- 数据集注册表 ---
     datasets: dict = field(default_factory=dict)
 
 
-# ---------------------------------------------------------------------------
-# 默认数据集配置
-# ---------------------------------------------------------------------------
 def get_dataset_configs():
     return {
         "PaviaU": DatasetConfig(
@@ -115,7 +116,6 @@ def get_dataset_configs():
 
 
 def resolve_config_defaults(cfg: TrainConfig):
-    """Resolve defaults that depend on another option without hiding explicit errors."""
     if cfg.progressive_lift == "auto":
         cfg.progressive_lift = (
             "normalized_adjoint"
@@ -141,45 +141,46 @@ def validate_config(cfg: TrainConfig):
         raise ValueError("boundary_probability must lie in [0, 1]")
     if cfg.boundary_radius < 0:
         raise ValueError("boundary_radius must be >= 0")
+    if cfg.ufg_rank < 1:
+        raise ValueError("ufg_rank must be >= 1")
+    if cfg.ufg_qiem_regularization <= 0:
+        raise ValueError("ufg_qiem_regularization must be > 0")
+    if cfg.ufg_fasa_tau <= 0:
+        raise ValueError("ufg_fasa_tau must be > 0")
+    for name in ("ufg_spectral_gate_kernel", "ufg_deform_kernel_size"):
+        value = getattr(cfg, name)
+        if value < 1 or value % 2 == 0:
+            raise ValueError(f"{name} must be a positive odd integer")
 
     if cfg.degradation_mode != "physical" and cfg.progressive_lift in (
         "adjoint",
         "normalized_adjoint",
     ):
         raise ValueError(
-            "adjoint/normalized_adjoint lift is only defined for physical "
-            "degradation; use bilinear or nearest for ordinary degradation"
+            "adjoint/normalized_adjoint lift is only defined for physical degradation"
         )
 
 
-# ---------------------------------------------------------------------------
-# 命令行参数解析
-# ---------------------------------------------------------------------------
 def parse_args(argv: Optional[List[str]] = None):
-    parser = argparse.ArgumentParser(description="HSI Super-Resolution Template")
+    parser = argparse.ArgumentParser(description="UFGNet HSI-MSI Fusion Reproduction")
 
-    # --- 运行控制 ---
     parser.add_argument("--stage", type=str, default="train")
     parser.add_argument("--dataset", type=str, default="PaviaU")
-
-    # --- 路径 ---
     parser.add_argument("--data_root", type=str, default="./data/raw")
     parser.add_argument("--checkpoint_root", type=str, default="./checkpoints")
     parser.add_argument("--log_root", type=str, default="./logs")
     parser.add_argument("--output_root", type=str, default="./outputs")
 
-    # --- 数据 ---
     parser.add_argument("--image_size", type=int, default=128)
     parser.add_argument("--patch_size", type=int, default=64)
     parser.add_argument("--stride", type=int, default=32)
     parser.add_argument("--scale_ratio", type=int, default=4)
     parser.add_argument("--n_select_bands", type=int, default=5)
 
-    # --- LR-HSI 退化 ---
     parser.add_argument(
         "--degradation_mode",
         type=str,
-        default="physical",
+        default="gaussian_bicubic",
         choices=["bicubic", "gaussian_bicubic", "physical"],
     )
     parser.add_argument("--degradation_sigma", type=float, default=2.0)
@@ -187,7 +188,6 @@ def parse_args(argv: Optional[List[str]] = None):
     parser.add_argument("--mtf_nyquist", type=float, default=0.2)
     parser.add_argument("--psf_truncate", type=float, default=3.0)
 
-    # --- 渐进退化 ---
     parser.add_argument("--progressive_steps", type=int, default=12)
     parser.add_argument(
         "--progressive_lift",
@@ -198,10 +198,7 @@ def parse_args(argv: Optional[List[str]] = None):
     parser.add_argument("--boundary_probability", type=float, default=0.2)
     parser.add_argument("--boundary_radius", type=int, default=1)
 
-    # --- MSI 生成 ---
-    parser.add_argument(
-        "--msi_mode", type=str, default="uniform", choices=["uniform", "srf"]
-    )
+    parser.add_argument("--msi_mode", type=str, default="srf", choices=["uniform", "srf"])
     parser.add_argument(
         "--srf_path",
         type=str,
@@ -209,9 +206,7 @@ def parse_args(argv: Optional[List[str]] = None):
     )
     parser.add_argument("--wavelength_root", type=str, default="./data/wavelengths")
     parser.add_argument("--wavelength_path", type=str, default="")
-    parser.add_argument(
-        "--srf_interp", type=str, default="pchip", choices=["pchip", "linear"]
-    )
+    parser.add_argument("--srf_interp", type=str, default="pchip", choices=["pchip", "linear"])
     parser.add_argument(
         "--srf_band_set",
         type=str,
@@ -219,42 +214,40 @@ def parse_args(argv: Optional[List[str]] = None):
         choices=["wv2_visible5", "wv2_visible6", "wv2_all8"],
     )
 
-    # --- 训练 ---
     parser.add_argument("--epochs", type=int, default=300)
-    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--num_workers", type=int, default=0)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr", type=float, default=5e-4)
     parser.add_argument("--weight_decay", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=10)
     parser.add_argument("--device", type=str, default="cuda")
 
-    # --- 损失权重 ---
-    parser.add_argument("--lambda_l1", type=float, default=1.0)
-    parser.add_argument("--lambda_sam", type=float, default=0.1)
-    parser.add_argument("--lambda_dc", type=float, default=0.1)
-    parser.add_argument("--lambda_sgrad", type=float, default=0.05)
-    parser.add_argument("--lambda_sdir", type=float, default=0.2)
-    parser.add_argument("--lambda_ns_l1", type=float, default=1.0)
-    parser.add_argument("--lambda_srf_region", type=float, default=0.3)
-    parser.add_argument("--lambda_mse", type=float, default=1.0)
+    parser.add_argument("--lambda_rec", type=float, default=1.0)
+    parser.add_argument("--lambda_sam", type=float, default=1e-2)
+    parser.add_argument("--lambda_freq", type=float, default=1e-2)
+    parser.add_argument("--freq_gamma", type=float, default=0.5)
+    parser.add_argument("--freq_eta", type=float, default=0.5)
 
-    # --- 保存 / 恢复 ---
+    parser.add_argument("--ufg_rank", type=int, default=5)
+    parser.add_argument("--ufg_qiem_regularization", type=float, default=1e-4)
+    parser.add_argument("--ufg_fasa_tau", type=float, default=1.0)
+    parser.add_argument("--ufg_spectral_gate_kernel", type=int, default=3)
+    parser.add_argument("--ufg_deform_kernel_size", type=int, default=3)
+
     parser.add_argument("--save_interval", type=int, default=20)
     parser.add_argument("--eval_interval", type=int, default=1)
     parser.add_argument("--resume", type=str, default="")
     parser.add_argument("--save_name", type=str, default="")
 
     args = parser.parse_args(argv)
-
     cfg = TrainConfig()
     cfg.datasets = get_dataset_configs()
-
     for key, value in vars(args).items():
         setattr(cfg, key, value)
 
     dataset_cfg = cfg.datasets.get(cfg.dataset)
-    if dataset_cfg is not None:
-        cfg.n_select_bands = args.n_select_bands or dataset_cfg.n_select_bands
+    if dataset_cfg is None:
+        raise ValueError(f"Unknown dataset: {cfg.dataset}")
 
     resolve_config_defaults(cfg)
     validate_config(cfg)
@@ -262,9 +255,6 @@ def parse_args(argv: Optional[List[str]] = None):
     return cfg
 
 
-# ---------------------------------------------------------------------------
-# 目录创建
-# ---------------------------------------------------------------------------
 def make_dirs(cfg: TrainConfig):
     dirs = [
         cfg.checkpoint_root,
@@ -278,19 +268,18 @@ def make_dirs(cfg: TrainConfig):
         os.makedirs(path, exist_ok=True)
 
 
-# ---------------------------------------------------------------------------
-# 辅助函数
-# ---------------------------------------------------------------------------
 def get_checkpoint_path(cfg: TrainConfig, stage: str = None, name: str = None):
     stage = stage or cfg.stage
-    if name is None or name == "":
+    if not name:
         name = f"{cfg.dataset}_{stage}.pth"
-    return os.path.join(cfg.checkpoint_root, stage, name)
+    path = os.path.join(cfg.checkpoint_root, stage, name)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    return path
 
 
 def print_config(cfg: TrainConfig):
     print("=" * 60)
-    print("HSI Super-Resolution Template  Config")
+    print("UFGNet Reproduction Config")
     print("=" * 60)
     for key, value in cfg.__dict__.items():
         if key != "datasets":
