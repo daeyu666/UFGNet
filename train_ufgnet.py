@@ -174,6 +174,10 @@ def main() -> None:
         f"full scene={info['full_scene_shape']} | "
         f"protocol={info['sampling_protocol']}"
     )
+    print(
+        f"Retained HR-MSI channels={info['n_select_bands']} | "
+        f"bands={info.get('srf_band_names')}"
+    )
 
     model, criterion, degradation = build_model_and_loss(cfg, info, device)
     optimizer = torch.optim.Adam(
@@ -258,6 +262,11 @@ def main() -> None:
             "diagnostics": final_diag,
             "sampling_protocol": info["sampling_protocol"],
             "full_scene_shape": info["full_scene_shape"],
+            "msi_channels": info["n_select_bands"],
+            "srf_band_names": info.get("srf_band_names"),
+            "srf_coverage_policy": cfg.srf_coverage_policy,
+            "srf_min_coverage_ratio": cfg.srf_min_coverage_ratio,
+            "srf_coverage_diagnostics": info.get("srf_coverage_diagnostics", []),
         },
     )
 
