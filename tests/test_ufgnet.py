@@ -2,12 +2,38 @@ import torch
 
 from degradations import build_degradation
 from losses import UFGNetLoss
-from models import UFGNet, project_hsi_to_msi
+from models import (
+    FrequencyAwareSpectralAttention,
+    UFGNet,
+    project_hsi_to_msi,
+)
 
 
 def _normalized_srf(msi_channels: int, hsi_channels: int) -> torch.Tensor:
     srf = torch.rand(msi_channels, hsi_channels)
     return srf / srf.sum(dim=1, keepdim=True).clamp_min(1e-8)
+
+
+def test_fasa_matches_paper_equation_18():
+    torch.manual_seed(3)
+    residual = torch.tensor(
+        [[[[1.0, 2.0]], [[0.5, -1.0]], [[2.0, 0.0]]]], dtype=torch.float32
+    )
+    guidance = torch.tensor(
+        [[[[0.0, 0.0]], [[1.0, 1.0]], [[2.0, 2.0]]]], dtype=torch.float32
+    )
+    tau = 2.0
+    fasa = FrequencyAwareSpectralAttention(channels=3, tau=tau)
+    _, affinity = fasa(residual, guidance)
+
+    q = residual.reshape(1, 3, -1)
+    correlation = torch.matmul(q, q.transpose(1, 2))
+    f = guidance.mean(dim=(-2, -1))
+    dist2 = (f.unsqueeze(2) - f.unsqueeze(1)).pow(2)
+    physical_prior = torch.exp(-dist2 / tau)
+    expected = torch.softmax(correlation * physical_prior, dim=-1)
+
+    assert torch.allclose(affinity, expected, atol=1e-6, rtol=1e-6)
 
 
 def test_ufgnet_forward_shapes_and_finite_values():
@@ -22,6 +48,8 @@ def test_ufgnet_forward_shapes_and_finite_values():
     lr_hsi = degradation.degrade(gt)
     hr_msi = project_hsi_to_msi(gt, srf)
 
+    # K=3 is used in this small unit test because Eq. (20) explicitly gives
+    # the 3x3 / 9-sample case; the experiment config defaults to paper K=7.
     model = UFGNet(
         hsi_channels=c,
         msi_channels=m,
