@@ -43,14 +43,15 @@ class TrainConfig:
     boundary_probability: float = 0.2
     boundary_radius: int = 1
 
-    # Real-SRF MSI simulation. all8 is a candidate set; physical coverage
-    # filtering decides which bands can be supported by each HSI wavelength grid.
+    # Real-SRF MSI simulation. ``auto`` resolves to IKONOS 4-band for PaviaU
+    # and WV2 all8 for Houston13/Chikusei. Explicit paths/band sets are kept for
+    # ablations and backward-compatible protocol checks.
     msi_mode: str = "srf"
-    srf_path: str = "./data/srf/wv2_relative_spectral_response_data_for_i.atcorr.csv"
+    srf_path: str = ""
     wavelength_root: str = "./data/wavelengths"
     wavelength_path: str = ""
     srf_interp: str = "pchip"
-    srf_band_set: str = "wv2_all8"
+    srf_band_set: str = "auto"
     srf_min_coverage_ratio: float = 0.90
     srf_coverage_policy: str = "filter"
 
@@ -100,7 +101,7 @@ def get_dataset_configs():
             name="PaviaU",
             file_name="PaviaU.mat",
             mat_keys=["paviaU", "PaviaU", "img", "data"],
-            n_select_bands=8,
+            n_select_bands=4,
         ),
         "Houston13": DatasetConfig(
             name="Houston13",
@@ -208,7 +209,8 @@ def parse_args(argv: Optional[List[str]] = None):
     parser.add_argument(
         "--srf_path",
         type=str,
-        default="./data/srf/wv2_relative_spectral_response_data_for_i.atcorr.csv",
+        default="",
+        help="Optional explicit SRF CSV path. Empty uses the selected profile default.",
     )
     parser.add_argument("--wavelength_root", type=str, default="./data/wavelengths")
     parser.add_argument("--wavelength_path", type=str, default="")
@@ -216,8 +218,9 @@ def parse_args(argv: Optional[List[str]] = None):
     parser.add_argument(
         "--srf_band_set",
         type=str,
-        default="wv2_all8",
-        choices=["wv2_visible5", "wv2_visible6", "wv2_all8"],
+        default="auto",
+        choices=["auto", "ikonos4", "wv2_visible5", "wv2_visible6", "wv2_all8"],
+        help="auto: PaviaU->IKONOS4, Houston13/Chikusei->WV2 all8.",
     )
     parser.add_argument(
         "--srf_min_coverage_ratio",
