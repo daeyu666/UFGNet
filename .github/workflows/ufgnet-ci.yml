@@ -21,13 +21,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install numpy scipy pandas pytest
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-      - name: Run degradation and UFGNet tests
+      - name: Run degradation, SRF, and UFGNet tests
         run: |
           pytest -q \
             tests/test_degradation_closure.py \
             tests/test_data_pipeline_degradation.py \
+            tests/test_srf_coverage.py \
             tests/test_ufgnet.py \
             tests/test_ufgnet_data_protocol.py
+      - name: Audit physical SRF coverage
+        run: |
+          python audit_srf_coverage.py
       - name: Audit UFGNet parameter counts
         run: |
           python audit_ufgnet.py
