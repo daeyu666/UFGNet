@@ -15,6 +15,20 @@
 | `config.py` | 数据、退化和训练通用配置 |
 | `main.py` | 检查数据与退化配置是否正确串联 |
 
+## UFGNet reproduction protocol
+
+当前复现分支采用用户指定实验协议，而不是论文原始 8× 数据退化设置：
+
+- 空间倍率固定为 `4×`；
+- 首阶段主实验使用 `gaussian_bicubic`：Gaussian blur + Bicubic downsampling；
+- Gaussian 核参数沿用仓库默认设置；
+- HR-MSI 使用仓库现有 SRF 构建；
+- 网络结构严格按照 UFGNet 论文实现，不简化 QIEM、FGM、CCRM、SpeDOB、SpaDOB、FASA；
+- 无监督训练损失严格保留 reconstruction、SAM 与 integrated dual-domain frequency consistency 三项；
+- 评价指标固定为 PSNR / SSIM / ERGAS / SAM / CC / RMSE。
+
+为保持无监督观测闭合，数据生成、CCRM residual back-projection 与训练 loss 共用同一个空间退化算子和同一 SRF。
+
 ## Degradation v1
 
 ### 1. LR-HSI 退化模式
@@ -23,18 +37,16 @@
 
 - `bicubic`：纯 Bicubic 下采样；
 - `gaussian_bicubic`：Gaussian blur + Bicubic，下采样基线；
-- `physical`：Gaussian PSF/MTF + detector area averaging + sampling，作为当前主实验退化。
+- `physical`：Gaussian PSF/MTF + detector area averaging + sampling，作为后续扩展退化。
 
-新实验默认：
+当前 UFGNet 仿真复现默认：
 
 ```text
-degradation_mode = physical
+degradation_mode = gaussian_bicubic
 scale_ratio = 4
-mtf_nyquist = 0.2
-psf_truncate = 3.0
 ```
 
-旧 `make_lr_hsi()` 在未传入退化算子时仍保持 Gaussian+Bicubic 概念基线，避免旧脚本静默改变结果。
+物理退化实验仍保留原配置供后续对照。
 
 ### 2. Progressive degradation
 
@@ -96,7 +108,19 @@ data/raw/Houston13.mat
 data/raw/Chikusei.mat
 ```
 
-### Physical 主实验轨迹
+### Gaussian+Bicubic UFGNet 主实验轨迹
+
+```bash
+python check_degradation_trajectory.py \
+  --dataset PaviaU \
+  --mode gaussian_bicubic \
+  --lift_mode auto \
+  --crop_size 128 \
+  --scale_ratio 4 \
+  --total_steps 12
+```
+
+### Physical 后续对照
 
 ```bash
 python check_degradation_trajectory.py \
@@ -107,20 +131,6 @@ python check_degradation_trajectory.py \
   --scale_ratio 4 \
   --total_steps 12 \
   --mtf_nyquist 0.2
-```
-
-### Gaussian+Bicubic 对照
-
-```bash
-python check_degradation_trajectory.py \
-  --dataset PaviaU \
-  --mode gaussian_bicubic \
-  --lift_mode auto \
-  --crop_size 128 \
-  --scale_ratio 4 \
-  --total_steps 12 \
-  --legacy_sigma 2.0 \
-  --legacy_kernel 5
 ```
 
 ### Bicubic 对照
@@ -158,17 +168,13 @@ outputs/degradation_trajectory/
 
 ## HSI-MSI Fusion 数据
 
-正式融合实验建议使用真实 SRF：
+正式融合实验使用仓库现有 SRF：
 
 ```bash
 python main.py \
   --dataset PaviaU \
-  --degradation_mode physical \
+  --degradation_mode gaussian_bicubic \
   --msi_mode srf
 ```
 
 仓库已经包含 PaviaU、Houston13、Chikusei 的波长文件和 WorldView-2 SRF CSV；原始 HSI `.mat` 不提交到仓库。
-
-## 当前阶段
-
-当前先完成退化轨迹与数据闭合验证。只有真实 HSI 上的 trajectory sanity check 通过后，再接 clean HR-HSI predictor 和扩散训练循环；MSI 高频可迁移引导留到创新点 1 稳定后加入。
