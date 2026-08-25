@@ -18,6 +18,17 @@ from srf_utils import (
     print_srf_summary,
 )
 
+
+IKONOS_4_BANDS = [
+    "IKONOS Blue",
+    "IKONOS Green",
+    "IKONOS Red",
+    "IKONOS NIR",
+]
+WV2_SRF_PATH = "./data/srf/wv2_relative_spectral_response_data_for_i.atcorr.csv"
+IKONOS_SRF_PATH = "./data/srf/ikonos_relative_spectral_response.csv"
+PAVIA_NOMINAL_WAVELENGTH_PATH = "./data/wavelengths/PaviaU_nominal_430_860.txt"
+
 try:
     import scipy.io as scio
 except ImportError:
@@ -326,6 +337,64 @@ class HSIHSRDataset(Dataset):
         }
 
 
+def _resolve_srf_spec(cfg, n_bands: int):
+    """Resolve a physical SRF profile and the HSI wavelength grid.
+
+    ``auto`` keeps the real sensor coherent within each dataset:
+    PaviaU uses IKONOS Blue/Green/Red/NIR, matching the UFGNet paper's
+    multispectral simulation; Houston13 and Chikusei use all eight WV2 bands.
+
+    For PaviaU, the public benchmark is conventionally described as 103 valid
+    bands spanning 430-860 nm. The repository keeps the former PaviaU.txt for
+    legacy experiments, while the IKONOS profile uses an explicit nominal
+    430-860 nm benchmark grid rather than the former 430-838 approximation.
+    """
+    requested = getattr(cfg, "srf_band_set", "auto")
+    if requested == "auto":
+        resolved = "ikonos4" if cfg.dataset == "PaviaU" else "wv2_all8"
+    else:
+        resolved = requested
+
+    if resolved == "ikonos4":
+        selected_bands = IKONOS_4_BANDS
+        default_srf_path = IKONOS_SRF_PATH
+    elif resolved == "wv2_visible5":
+        selected_bands = WV2_VISIBLE_5_BANDS
+        default_srf_path = WV2_SRF_PATH
+    elif resolved == "wv2_visible6":
+        selected_bands = WV2_VISIBLE_6_BANDS
+        default_srf_path = WV2_SRF_PATH
+    elif resolved == "wv2_all8":
+        selected_bands = WV2_ALL_8_BANDS
+        default_srf_path = WV2_SRF_PATH
+    else:
+        raise ValueError(f"Unsupported srf_band_set: {resolved}")
+
+    srf_path = getattr(cfg, "srf_path", "") or default_srf_path
+
+    explicit_wavelength_path = getattr(cfg, "wavelength_path", "")
+    if explicit_wavelength_path:
+        wavelength_path = explicit_wavelength_path
+        hsi_wavelengths = load_hsi_wavelengths(wavelength_path, n_bands=n_bands)
+    elif cfg.dataset == "PaviaU" and resolved == "ikonos4":
+        wavelength_path = PAVIA_NOMINAL_WAVELENGTH_PATH
+        if n_bands == 103 and os.path.exists(wavelength_path):
+            hsi_wavelengths = load_hsi_wavelengths(wavelength_path, n_bands=n_bands)
+        else:
+            # Benchmark-compatible fallback for a Pavia spectral crop with a
+            # different band count: preserve the documented 430-860 nm support.
+            hsi_wavelengths = np.linspace(430.0, 860.0, n_bands).astype(np.float32)
+            wavelength_path = f"nominal:430-860nm/{n_bands}bands"
+    else:
+        wavelength_path = os.path.join(cfg.wavelength_root, f"{cfg.dataset}.txt")
+        hsi_wavelengths = load_hsi_wavelengths(wavelength_path, n_bands=n_bands)
+
+    cfg.resolved_srf_band_set = resolved
+    cfg.resolved_srf_path = srf_path
+    cfg.resolved_wavelength_path = wavelength_path
+    return srf_path, selected_bands, hsi_wavelengths, wavelength_path, resolved
+
+
 def _build_srf(cfg, n_bands: int):
     srf_weights = None
     srf_band_names = None
@@ -341,29 +410,18 @@ def _build_srf(cfg, n_bands: int):
             coverage_diagnostics,
         )
 
-    wavelength_path = (
-        cfg.wavelength_path
-        if cfg.wavelength_path
-        else os.path.join(cfg.wavelength_root, f"{cfg.dataset}.txt")
-    )
-    hsi_wavelengths = load_hsi_wavelengths(
-        wavelength_path=wavelength_path,
-        n_bands=n_bands,
-    )
-
-    if cfg.srf_band_set == "wv2_visible5":
-        selected_bands = WV2_VISIBLE_5_BANDS
-    elif cfg.srf_band_set == "wv2_visible6":
-        selected_bands = WV2_VISIBLE_6_BANDS
-    elif cfg.srf_band_set == "wv2_all8":
-        selected_bands = WV2_ALL_8_BANDS
-    else:
-        raise ValueError(f"Unsupported srf_band_set: {cfg.srf_band_set}")
+    (
+        srf_path,
+        selected_bands,
+        hsi_wavelengths,
+        wavelength_path,
+        resolved_band_set,
+    ) = _resolve_srf_spec(cfg, n_bands)
 
     min_coverage_ratio = getattr(cfg, "srf_min_coverage_ratio", 0.90)
     coverage_policy = getattr(cfg, "srf_coverage_policy", "filter")
     srf_weights, srf_band_names, coverage_diagnostics = build_srf_weights(
-        srf_path=cfg.srf_path,
+        srf_path=srf_path,
         hsi_wavelengths=hsi_wavelengths,
         selected_bands=selected_bands,
         interp_kind=cfg.srf_interp,
@@ -371,6 +429,10 @@ def _build_srf(cfg, n_bands: int):
         min_coverage_ratio=min_coverage_ratio,
         coverage_policy=coverage_policy,
         return_diagnostics=True,
+    )
+    print(
+        f"Resolved SRF: dataset={cfg.dataset}, profile={resolved_band_set}, "
+        f"path={srf_path}, wavelength_grid={wavelength_path}"
     )
     print_srf_summary(
         srf_weights=srf_weights,
@@ -454,10 +516,13 @@ def build_datasets(cfg):
         "degradation_operator": degradation_operator,
         "progressive_degradation": progressive_degradation,
         "msi_mode": getattr(cfg, "msi_mode", "uniform"),
+        "srf_profile": getattr(cfg, "resolved_srf_band_set", None),
+        "srf_path": getattr(cfg, "resolved_srf_path", None),
         "srf_weights": srf_weights,
         "srf_band_names": srf_band_names,
         "srf_coverage_diagnostics": coverage_diagnostics,
         "hsi_wavelengths": hsi_wavelengths,
+        "hsi_wavelength_path": getattr(cfg, "resolved_wavelength_path", None),
     }
 
     return train_set, test_set, info
