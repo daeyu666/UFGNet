@@ -7,16 +7,6 @@ Implements:
 
 The spatial degradation operator is injected at forward time so the network can reuse
 exactly the same Gaussian+Bicubic operator that generated the LR-HSI observations.
-
-Source-faithfulness notes:
-- Fig. 4 schematically draws a phase-domain cosine/sine convolution block, while
-  Algorithm 1 and Eq. (13) explicitly define phase-only inverse FFT followed by a
-  3x3 C_phase mapping. The executable baseline follows the explicit algorithm/equation.
-- Eq. (20) defines K as the TOTAL number of deformable sampling elements and gives
-  K=9 for a 3x3 kernel. Sec. IV-F later reuses K as a "kernel size" varied from
-  3 to 9, with K=7 optimal. Because those two K definitions cannot be mapped to a
-  unique standard DConv shape, the executable DConv defaults to the explicitly
-  illustrated 3x3 grid rather than silently interpreting K=7 as a 7x7 kernel.
 """
 
 from __future__ import annotations
@@ -198,19 +188,23 @@ class FrequencyAwareSpectralAttention(nn.Module):
         b, c, h, w = spectral_residual.shape
         q = spectral_residual.reshape(b, c, h * w)
 
-        # Data-driven term QQ^T in Eq. (18).
+        # Data-driven term Q Q^T from Eq. (18).
         correlation = torch.matmul(q, q.transpose(1, 2))
 
         # Eq. (17): P_ij = exp(-||f_i-f_j||_2^2 / tau), where f is obtained
-        # by global spatial pooling of F_spe. For scalar per-band pooled values,
-        # ||f_i-f_j||_2^2 reduces to the squared scalar difference.
+        # by global spatial pooling of F_spe. For the scalar pooled value of each
+        # band, the squared L2 distance is simply the squared scalar difference.
         f = spectral_guidance.mean(dim=(-2, -1))
         dist2 = (f.unsqueeze(2) - f.unsqueeze(1)).pow(2)
-        physical_prior = torch.exp(-dist2 / self.tau)
 
-        # Eq. (18) places the product (Q_i Q_j^T) * P_ij INSIDE the exponent.
-        fused_similarity = correlation * physical_prior
-        affinity = torch.softmax(fused_similarity, dim=-1)
+        # Paper Eq. (18):
+        #   M_ij = exp(Q_i Q_j^T) * P_ij /
+        #          sum_k [exp(Q_i Q_k^T) * P_ik]
+        # with P_ij from Eq. (17). This is exactly softmax(correlation + log P)
+        # = softmax(correlation - dist2/tau). Keeping it in log space avoids
+        # overflow without altering the published normalization.
+        fused_logits = correlation - dist2 / self.tau
+        affinity = torch.softmax(fused_logits, dim=-1)
 
         # Eq. (19): Conv_1x1(R_spe odot Sigmoid((M R_spe^T)^T)).
         aggregated = torch.matmul(affinity, q).reshape(b, c, h, w)
@@ -291,9 +285,7 @@ class SpatialDifferentialOptimizationBranch(nn.Module):
         self.padding = kernel_size // 2
         k_total = kernel_size * kernel_size
 
-        # C_offset itself is explicitly 3x3 in Eq. (20). Its output dimensionality
-        # is 3*K_total for a square-grid implementation: 2*K_total offsets plus
-        # K_total modulation masks. The paper explicitly illustrates K_total=9.
+        # C_offset itself is explicitly 3x3 in Eq. (20).
         self.offset_estimator = nn.Conv2d(
             channels, 3 * k_total, kernel_size=3, padding=1
         )
@@ -359,9 +351,7 @@ class CrossComplementaryRefinementModule(nn.Module):
         srf: torch.Tensor,
         degradation_operator: nn.Module,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-        # Eq. (15): R_spe = U_spa(X - D_spa(Z1)); paper explicitly gives
-        # bicubic as the simple U_spa example. D_spa itself is the exact same
-        # injected Gaussian+Bicubic observation operator used to generate X.
+        # Eq. (15): R_spe = U_spa(X - D_spa(Z1)); U_spa is bicubic.
         degraded_z1 = degradation_operator.degrade(z1)
         lr_residual = lr_hsi - degraded_z1
         r_spe = F.interpolate(
