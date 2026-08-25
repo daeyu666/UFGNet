@@ -64,8 +64,8 @@ def test_ufgnet_forward_shapes_and_finite_values():
     lr_hsi = degradation.degrade(gt)
     hr_msi = project_hsi_to_msi(gt, srf)
 
-    # K=3 is used in this small unit test because Eq. (20) explicitly gives
-    # the 3x3 / 9-sample case; the experiment config defaults to paper K=7.
+    # Eq. (20) explicitly illustrates a 3x3 grid: 9 sampling elements,
+    # 18 offset channels and 9 modulation-mask channels.
     model = UFGNet(
         hsi_channels=c,
         msi_channels=m,
