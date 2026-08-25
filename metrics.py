@@ -8,8 +8,15 @@ import torch.nn.functional as F
 
 
 def calc_rmse(pred: torch.Tensor, target: torch.Tensor) -> float:
-    pred = torch.clamp(pred.detach().float(), 0.0, 1.0)
-    target = torch.clamp(target.detach().float(), 0.0, 1.0)
+    """Root mean square error on the reconstructed values as produced.
+
+    Do not silently clamp the prediction before evaluation. The paper defines
+    RMSE as pixel-wise deviation and does not specify clipping as part of the
+    metric protocol; out-of-range reconstruction errors should therefore remain
+    visible in monitoring/evaluation.
+    """
+    pred = pred.detach().float()
+    target = target.detach().float()
     mse = F.mse_loss(pred, target).item()
     return math.sqrt(max(mse, 1e-12))
 
@@ -26,8 +33,8 @@ def calc_sam(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> flo
     pred = pred.detach().float()
     target = target.detach().float()
     dot = torch.sum(pred * target, dim=1)
-    pred_norm = torch.sqrt(torch.sum(pred * pred, dim=1) + eps)
-    target_norm = torch.sqrt(torch.sum(target * target, dim=1) + eps)
+    pred_norm = torch.sqrt(torch.sum(pred * pred, dim=1))
+    target_norm = torch.sqrt(torch.sum(target * target, dim=1))
     cos = dot / (pred_norm * target_norm + eps)
     cos = torch.clamp(cos, -1.0 + eps, 1.0 - eps)
     angle = torch.acos(cos) * 180.0 / math.pi
@@ -86,8 +93,8 @@ def calc_ssim(
     eps: float = 1e-12,
 ) -> float:
     """Standard local-window SSIM averaged over batch, bands and pixels."""
-    pred = torch.clamp(pred.detach().float(), 0.0, data_range)
-    target = torch.clamp(target.detach().float(), 0.0, data_range)
+    pred = pred.detach().float()
+    target = target.detach().float()
     if pred.shape != target.shape or pred.ndim != 4:
         raise ValueError("SSIM expects matching BxCxHxW tensors")
 
