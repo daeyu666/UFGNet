@@ -17,6 +17,7 @@ batch_size = 1
 optimizer = Adam
 lr = 5e-4
 msi_mode = srf
+srf_band_set = auto
 ```
 
 LR-HSI 由完整 HR-HSI 场景先执行 `5x5 Gaussian(sigma=2) + Bicubic x4` 生成一次，再从同一观测对切取重叠 patch；最终指标在完整场景上评估。数据生成、CCRM 残差回投和无监督 loss 共用同一个空间退化算子与同一 SRF。
@@ -40,9 +41,23 @@ python train_ufgnet.py \
   --device cuda
 ```
 
+## 数据集对应真实 SRF
+
+默认 `srf_band_set=auto` 不再强制所有数据集使用同一组传感器波段，而是在每个数据集内固定一个物理一致的观测模型：
+
+```text
+PaviaU    -> IKONOS Blue / Green / Red / NIR (4 bands)
+Houston13 -> WorldView-2 all8
+Chikusei  -> WorldView-2 all8
+```
+
+PaviaU 的 IKONOS 数值曲线保存在 `data/srf/ikonos_relative_spectral_response.csv`，由 HySure 项目公开的 `ikonos_spec_resp.mat` 数值数组转换而来；来源、原始 blob SHA 与验证说明见 `data/srf/IKONOS_SOURCE.md`。
+
+PaviaU 的公开基准通常描述为 103 个有效波段覆盖 430-860 nm。原仓库 `PaviaU.txt` 的 430-838 nm 网格继续保留用于旧实验复核；当前 IKONOS 主协议使用 `PaviaU_nominal_430_860.txt`，对应常见 Pavia/ROSIS fusion benchmark 的 430-860 nm 映射约定。
+
 ## SRF 物理覆盖保护
 
-`wv2_all8` 现在表示“以 WV2 全部 8 个真实波段作为候选集合”，并不表示无条件生成 8 通道 MSI。代码会先在归一化之前计算每个真实 SRF 在当前 HSI 光谱支持范围内的完整能量覆盖率：
+无论使用 IKONOS 还是 WV2，代码都会在归一化之前计算每个真实 SRF 在当前 HSI 光谱支持范围内的完整能量覆盖率：
 
 ```math
 rho_m = integral_{HSI support} S_m(lambda) d lambda / integral S_m(lambda) d lambda
@@ -50,12 +65,21 @@ rho_m = integral_{HSI support} S_m(lambda) d lambda / integral S_m(lambda) d lam
 
 默认阈值为 `0.90`，低于阈值的波段在离散化和归一化之前被剔除，避免把极小的截断尾部重新归一化成完整 MSI 通道。
 
-当前 WV2 审计结果：
+当前默认审计预期：
 
 ```text
-PaviaU    -> 5/8: Blue, Green, Yellow, Red, RedEdge
-Houston13 -> 8/8
-Chikusei  -> 8/8
+PaviaU / IKONOS4
+  Blue  > 96%
+  Green > 98%
+  Red   > 99%
+  NIR   > 92%
+  => 4/4 retained
+
+Houston13 / WV2 all8
+  => 8/8 retained
+
+Chikusei / WV2 all8
+  => 8/8 retained
 ```
 
 可独立检查：
@@ -64,7 +88,7 @@ Chikusei  -> 8/8
 python audit_srf_coverage.py
 ```
 
-`wv2_visible5`、`wv2_visible6` 和 `wv2_all8` 仍保留为候选集合选项；`srf_coverage_policy=filter` 为当前正式物理保护模式。
+`ikonos4`、`wv2_visible5`、`wv2_visible6` 和 `wv2_all8` 均可通过 `--srf_band_set` 显式指定；`auto` 为正式默认。`srf_coverage_policy=filter` 为当前物理保护模式。
 
 ## UFGNet 来源一致性说明
 
@@ -115,13 +139,14 @@ data/raw/Chikusei.mat
 
 ## EMR-Diff 对比实验
 
-`EMR-Diff/` 目录保留原有对比实现。当前主仓库的 UFGNet SRF 协议已经切换为真实 SRF + 覆盖保护；后续若要求 EMR-Diff 与 UFGNet 做正式同表比较，应让 EMR-Diff 也读取同一个根目录观测对，而不是继续使用历史的 uniform 8-band 观测。
+`EMR-Diff/` 已改为读取与根目录相同的真实 SRF 策略和物理覆盖规则，MSI 通道数按数据集动态配置，因此 PaviaU 默认使用 IKONOS 4-band，Houston13/Chikusei 默认使用 WV2 all8。
 
-训练入口仍可使用：
+训练入口：
 
 ```bash
 cd EMR-Diff
 python Train.py --dataset PaviaU
+python Train.py --dataset Houston13
 python Train.py --dataset Chikusei
 ```
 
