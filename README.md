@@ -33,17 +33,13 @@ python train_ufgnet.py \
 1. FGM 空间分支：Fig. 4 的示意图包含 `cos(phi)` / `sin(phi)` 卷积分支与 `atan2`，但 Algorithm 1 和 Eq. (13) 明确定义为 phase-only inverse FFT 后接 3×3 `C_phase`。当前可执行实现以 Algorithm 1 / Eq. (13) 为准，并在代码中保留该差异说明；
 2. CCRM 中符号 `K` 被论文重复用于不兼容的含义。Eq. (20) 明确定义 `K` 为**采样元素总数**，并给出“3×3 kernel 时 K=9”；参数敏感性部分又将 `K` 称为**kernel size**，讨论 K=3、7、9 并报告 K=7 最优。由于该表述无法唯一映射为标准二维 deformable-convolution kernel，当前正式配置保留方法部分明确画出的 3×3 DConv，而不擅自把敏感性中的 K=7 解释成 7×7 DConv；
 3. Table III 参数量无法由论文已披露结构唯一复原。当前标准 full-channel 3×3 deformable convolution 在 Pavia 上约 0.130M，而论文报告 0.198M；若将敏感性 K=7 直接解释成 7×7 DConv，则会上升到约 0.577M，反而明显偏离论文参数量。仓库保留 `audit_ufgnet.py` 显式报告该差异，不通过猜测 grouped/depthwise 结构强行凑参数量；
-4. FASA Eq. (18) 已按公式实现为 `softmax((QQ^T) * P)`，其中 `P_ij=exp(-||f_i-f_j||^2/tau)`；SAM Eq. (24) 的 epsilon 仅加在两项 L2 范数乘积之后。
+4. FASA Eq. (18) 为 `exp(QQ^T) * P` 再沿通道归一化，其中 `P_ij=exp(-||f_i-f_j||^2/tau)`；代码使用完全等价、数值稳定的 `softmax(QQ^T - ||f_i-f_j||^2/tau)`；
+5. SAM Eq. (24) 的 epsilon 仅加在两项 L2 范数乘积之后；
+6. PSNR、SSIM、ERGAS、SAM、CC、RMSE 对网络原始输出计算，不在指标前静默把预测裁剪到 `[0,1]`，避免掩盖训练早期的越界重建误差。
 
 ### Reproduction sanity checks
 
-CPU CI 当前检查结果：
-
-```text
-12 tests passed
-```
-
-覆盖退化终点闭合、数据端退化一致性、完整 UFGNet 前向、无监督 loss backward、FASA Eq. (18)、SAM Eq. (24) 等。
+CPU CI 检查覆盖退化终点闭合、数据端退化一致性、完整 UFGNet 前向、无监督 loss backward、FASA Eq. (18)、SAM Eq. (24) 等。
 
 真实 HSI 长训练前先运行：
 
@@ -56,7 +52,21 @@ python sanity_check_ufgnet.py \
   --device cuda
 ```
 
-该脚本执行 1 个真实训练 batch 的完整前向/反向，并打印 QIEM、FGM、CCRM 中间量、FASA 行和、offset/mask、各损失项、各模块梯度范数、参数量以及 6 个 GT 监控指标。GT 仅用于监控，不进入无监督训练 loss。
+该脚本执行 1 个真实训练 batch 的完整前向/反向，并打印 QIEM、FGM、CCRM 中间量、FASA 行和/行最大值/归一化熵、offset/mask、各损失项、loss 加权贡献、各模块梯度范数、预测越界比例以及 6 个 GT 监控指标。GT 仅用于监控，不进入无监督训练 loss。
+
+随后对同一个真实 patch 做短程固定 batch 优化 smoke test：
+
+```bash
+python smoke_train_ufgnet.py \
+  --dataset PaviaU \
+  --scale_ratio 4 \
+  --degradation_mode gaussian_bicubic \
+  --msi_mode srf \
+  --device cuda \
+  --epochs 20
+```
+
+该 smoke test 的目标不是产生最终指标，而是验证总 loss 能在同一观测对上持续下降，并监控预测范围、FASA 饱和度与 QIEM/FGM/CCRM 梯度。
 
 参数量审计：
 
@@ -76,6 +86,7 @@ python audit_ufgnet.py
 | `models/ufgnet.py` | UFGNet：QIEM、FGM、CCRM、SpeDOB、SpaDOB、FASA |
 | `train_ufgnet.py` | UFGNet 无监督训练与全参考指标监控 |
 | `sanity_check_ufgnet.py` | 真实数据单 batch 前向/反向诊断 |
+| `smoke_train_ufgnet.py` | 固定真实 patch 的短程优化检查 |
 | `audit_ufgnet.py` | 论文 Table III 参数量对照与结构歧义审计 |
 | `losses.py` | SAMLoss 与 UFGNet 三项无监督复合损失 |
 | `metrics.py` | PSNR / RMSE / SAM / ERGAS / SSIM / CC |
@@ -241,4 +252,4 @@ python main.py \
 
 ## 当前阶段
 
-UFGNet 网络、损失、训练入口、自动化单元测试、参数量审计和真实数据单 batch sanity script 均已接入。CPU synthetic CI 已通过；下一步是在真实 HSI 数据上执行 `sanity_check_ufgnet.py`，确认中间量和梯度正常后再启动首轮 4× Gaussian+Bicubic 长训练。Physical 与 diffusion 路线保留作为后续扩展，不混入当前 UFGNet 仿真基线。
+UFGNet 网络、损失、训练入口、自动化单元测试、参数量审计、真实数据单 batch sanity 和固定 batch smoke script 均已接入。下一步先重新运行修正后的 sanity check，再运行 20-step smoke test；两者稳定后再启动 4× Gaussian+Bicubic 长训练。Physical 与 diffusion 路线保留作为后续扩展，不混入当前 UFGNet 仿真基线。
