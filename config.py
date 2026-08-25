@@ -48,7 +48,11 @@ class TrainConfig:
     wavelength_root: str = "./data/wavelengths"
     wavelength_path: str = ""
     srf_interp: str = "pchip"
-    srf_band_set: str = "wv2_visible6"
+    # Request all physical WV2 bands, then retain only those whose full SRF is
+    # sufficiently supported by the current HSI wavelength range.
+    srf_band_set: str = "wv2_all8"
+    srf_min_coverage_ratio: float = 0.90
+    srf_coverage_policy: str = "filter"
 
     epochs: int = 300
     batch_size: int = 1
@@ -100,7 +104,7 @@ def get_dataset_configs():
             name="PaviaU",
             file_name="PaviaU.mat",
             mat_keys=["paviaU", "PaviaU", "img", "data"],
-            n_select_bands=6,
+            n_select_bands=8,
         ),
         "Houston13": DatasetConfig(
             name="Houston13",
@@ -143,6 +147,10 @@ def validate_config(cfg: TrainConfig):
         raise ValueError("boundary_probability must lie in [0, 1]")
     if cfg.boundary_radius < 0:
         raise ValueError("boundary_radius must be >= 0")
+    if not 0.0 <= cfg.srf_min_coverage_ratio <= 1.0:
+        raise ValueError("srf_min_coverage_ratio must lie in [0, 1]")
+    if cfg.srf_coverage_policy not in {"off", "filter", "error"}:
+        raise ValueError("srf_coverage_policy must be one of: off, filter, error")
     if cfg.ufg_rank < 1:
         raise ValueError("ufg_rank must be >= 1")
     if cfg.ufg_qiem_regularization <= 0:
@@ -212,8 +220,21 @@ def parse_args(argv: Optional[List[str]] = None):
     parser.add_argument(
         "--srf_band_set",
         type=str,
-        default="wv2_visible6",
+        default="wv2_all8",
         choices=["wv2_visible5", "wv2_visible6", "wv2_all8"],
+    )
+    parser.add_argument(
+        "--srf_min_coverage_ratio",
+        type=float,
+        default=0.90,
+        help="Minimum fraction of a full physical SRF that must lie inside the HSI spectral support.",
+    )
+    parser.add_argument(
+        "--srf_coverage_policy",
+        type=str,
+        default="filter",
+        choices=["off", "filter", "error"],
+        help="How to handle requested SRF bands below the physical overlap threshold.",
     )
 
     parser.add_argument("--epochs", type=int, default=300)
