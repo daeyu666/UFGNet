@@ -6,12 +6,11 @@ separate validation split, and reported metrics come from full-image evaluation.
 
 This module keeps the repository's user-fixed 4x Gaussian+Bicubic degradation
 and SRF observation model, while making the sampling protocol faithful to that
-setup. For the standard 103-band Pavia University cube, the UFGNet fusion
-benchmark follows the established 93-band HMIF convention used by HySure and
-many later Pavia HSI-MSI fusion papers: the first 10 bands are removed before
-simulating the LR-HSI/HR-MSI pair. Requested physical SRF bands are filtered
-before normalization when their full-SRF overlap with the HSI spectral support
-is below the configured threshold.
+setup. PaviaU supports two explicit spectral conventions: ``native103`` keeps
+the standard public 103-band cube intact, while ``fusion93`` reproduces the
+HySure/UFGNet-style 103->93 benchmark crop by dropping the first ten channels.
+Requested physical SRF bands are filtered before normalization when their
+full-SRF overlap with the HSI spectral support is below the configured threshold.
 """
 
 from __future__ import annotations
@@ -43,19 +42,17 @@ PAVIA_DROP_LEADING_BANDS = PAVIA_STANDARD_BANDS - PAVIA_FUSION_BANDS
 def _apply_ufgnet_spectral_protocol(
     img: np.ndarray,
     dataset_name: str,
+    protocol: str = "native103",
 ) -> Tuple[np.ndarray, Dict[str, object]]:
-    """Apply the spectral protocol used by the UFGNet Pavia fusion benchmark.
+    """Apply an explicit PaviaU spectral protocol before observation synthesis.
 
-    The standard downloadable PaviaU cube contains 103 valid channels. A large
-    body of HSI-MSI fusion work evaluates Pavia on a 93-band cube. HySure's
-    executable Pavia benchmark makes this conversion explicitly with
-    ``Z = Z(11:end,:)`` after matrix conversion, i.e. it removes the first ten
-    channels. We use that exact, reproducible convention here rather than
-    inventing a new band selector.
+    ``native103`` keeps the standard 103-band Pavia University cube intact.
+    This is useful for the common 103-band PaviaU convention and maps IKONOS4
+    onto the nominal 430-860 nm support through the repository SRF pipeline.
 
-    A preprocessed 93-band Pavia cube is accepted unchanged. Other Pavia band
-    counts are rejected so that a silent spectral remapping cannot enter a
-    formal experiment.
+    ``fusion93`` reproduces the HySure-style HSI-MSI fusion benchmark by
+    removing the first ten channels from a standard 103-band cube. An already
+    preprocessed 93-band cube is accepted unchanged in this mode.
     """
     img = np.asarray(img)
     original_bands = int(img.shape[2])
@@ -69,32 +66,51 @@ def _apply_ufgnet_spectral_protocol(
     if dataset_name != "PaviaU":
         return img, metadata
 
-    if original_bands == PAVIA_STANDARD_BANDS:
-        img = np.ascontiguousarray(img[:, :, PAVIA_DROP_LEADING_BANDS:])
+    if protocol == "native103":
+        if original_bands != PAVIA_STANDARD_BANDS:
+            raise ValueError(
+                "PaviaU native103 protocol expects the standard 103-band cube, "
+                f"but got {original_bands} bands."
+            )
         metadata.update(
             {
-                "spectral_protocol": "paviau_hmif_103_to_93_drop_first10",
-                "retained_bands": PAVIA_FUSION_BANDS,
-                "dropped_band_indices_1based": list(
-                    range(1, PAVIA_DROP_LEADING_BANDS + 1)
-                ),
+                "spectral_protocol": "paviau_native_103",
+                "retained_bands": PAVIA_STANDARD_BANDS,
             }
         )
-        return img, metadata
+        return np.ascontiguousarray(img), metadata
 
-    if original_bands == PAVIA_FUSION_BANDS:
-        metadata.update(
-            {
-                "spectral_protocol": "paviau_hmif_93_preprocessed",
-                "retained_bands": PAVIA_FUSION_BANDS,
-            }
+    if protocol == "fusion93":
+        if original_bands == PAVIA_STANDARD_BANDS:
+            img = np.ascontiguousarray(img[:, :, PAVIA_DROP_LEADING_BANDS:])
+            metadata.update(
+                {
+                    "spectral_protocol": "paviau_hmif_103_to_93_drop_first10",
+                    "retained_bands": PAVIA_FUSION_BANDS,
+                    "dropped_band_indices_1based": list(
+                        range(1, PAVIA_DROP_LEADING_BANDS + 1)
+                    ),
+                }
+            )
+            return img, metadata
+
+        if original_bands == PAVIA_FUSION_BANDS:
+            metadata.update(
+                {
+                    "spectral_protocol": "paviau_hmif_93_preprocessed",
+                    "retained_bands": PAVIA_FUSION_BANDS,
+                }
+            )
+            return np.ascontiguousarray(img), metadata
+
+        raise ValueError(
+            "PaviaU fusion93 protocol expects either the standard 103-band cube "
+            f"or an already-preprocessed 93-band cube, but got {original_bands}."
         )
-        return img, metadata
 
     raise ValueError(
-        "Formal PaviaU UFGNet fusion protocol expects either the standard "
-        f"{PAVIA_STANDARD_BANDS}-band cube or an already-preprocessed "
-        f"{PAVIA_FUSION_BANDS}-band cube, but got {original_bands} bands."
+        f"Unsupported PaviaU spectral protocol: {protocol}. "
+        "Expected native103 or fusion93."
     )
 
 
@@ -226,12 +242,16 @@ def build_ufgnet_datasets(cfg):
     file_path = f"{cfg.data_root}/{dataset_cfg.file_name}"
 
     img = read_hsi_mat(file_path, dataset_cfg.mat_keys)
-    img, spectral_metadata = _apply_ufgnet_spectral_protocol(img, cfg.dataset)
+    img, spectral_metadata = _apply_ufgnet_spectral_protocol(
+        img,
+        cfg.dataset,
+        protocol=getattr(cfg, "pavia_spectral_protocol", "native103"),
+    )
     img = normalize_hsi(img)
     img = crop_to_scale(img, cfg.scale_ratio)
     n_bands = img.shape[2]
 
-    if spectral_metadata["spectral_protocol"] != "native":
+    if cfg.dataset == "PaviaU":
         print(
             "PaviaU spectral protocol: "
             f"{spectral_metadata['original_bands']} -> "
