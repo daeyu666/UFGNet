@@ -57,7 +57,7 @@ class TrainConfig:
     wavelength_root: str = "./data/wavelengths"
     wavelength_path: str = ""
     srf_interp: str = "pchip"          # "pchip" 或 "linear"
-    srf_band_set: str = "wv2_visible6" # "wv2_visible5" / "wv2_visible6" / "wv2_all8"
+    srf_band_set: str = "wv2_all8" # "wv2_visible5" / "wv2_visible6" / "wv2_all8"
 
     # --- 训练 ---
     epochs: int = 300
@@ -97,7 +97,7 @@ def get_dataset_configs():
             name="PaviaU",
             file_name="PaviaU.mat",
             mat_keys=["paviaU", "PaviaU", "img", "data"],
-            n_select_bands=6,
+            n_select_bands=8,
         ),
         "Houston13": DatasetConfig(
             name="Houston13",
@@ -215,7 +215,7 @@ def parse_args(argv: Optional[List[str]] = None):
     parser.add_argument(
         "--srf_band_set",
         type=str,
-        default="wv2_visible6",
+        default="wv2_all8",
         choices=["wv2_visible5", "wv2_visible6", "wv2_all8"],
     )
 
