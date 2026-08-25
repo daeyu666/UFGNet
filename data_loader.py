@@ -112,7 +112,7 @@ def hsi_to_tensor(img: np.ndarray) -> torch.Tensor:
 def tensor_to_hsi(x: torch.Tensor) -> np.ndarray:
     """C×H×W -> H×W×C."""
     if x.ndim != 3:
-        raise ValueError(f"Expected C×H×W tensor, got {tuple(x.shape)}")
+        raise ValueError(f"Expected C×HxW tensor, got {tuple(x.shape)}")
     return x.detach().cpu().permute(1, 2, 0).numpy().astype(np.float32)
 
 
@@ -330,9 +330,16 @@ def _build_srf(cfg, n_bands: int):
     srf_weights = None
     srf_band_names = None
     hsi_wavelengths = None
+    coverage_diagnostics = []
 
     if getattr(cfg, "msi_mode", "uniform") != "srf":
-        return srf_weights, srf_band_names, hsi_wavelengths, cfg.n_select_bands
+        return (
+            srf_weights,
+            srf_band_names,
+            hsi_wavelengths,
+            cfg.n_select_bands,
+            coverage_diagnostics,
+        )
 
     wavelength_path = (
         cfg.wavelength_path
@@ -353,19 +360,33 @@ def _build_srf(cfg, n_bands: int):
     else:
         raise ValueError(f"Unsupported srf_band_set: {cfg.srf_band_set}")
 
-    srf_weights, srf_band_names = build_srf_weights(
+    min_coverage_ratio = getattr(cfg, "srf_min_coverage_ratio", 0.90)
+    coverage_policy = getattr(cfg, "srf_coverage_policy", "filter")
+    srf_weights, srf_band_names, coverage_diagnostics = build_srf_weights(
         srf_path=cfg.srf_path,
         hsi_wavelengths=hsi_wavelengths,
         selected_bands=selected_bands,
         interp_kind=cfg.srf_interp,
         normalize=True,
+        min_coverage_ratio=min_coverage_ratio,
+        coverage_policy=coverage_policy,
+        return_diagnostics=True,
     )
     print_srf_summary(
         srf_weights=srf_weights,
         band_names=srf_band_names,
         hsi_wavelengths=hsi_wavelengths,
+        coverage_diagnostics=coverage_diagnostics,
+        min_coverage_ratio=min_coverage_ratio,
+        coverage_policy=coverage_policy,
     )
-    return srf_weights, srf_band_names, hsi_wavelengths, srf_weights.shape[0]
+    return (
+        srf_weights,
+        srf_band_names,
+        hsi_wavelengths,
+        srf_weights.shape[0],
+        coverage_diagnostics,
+    )
 
 
 def build_datasets(cfg):
@@ -379,9 +400,13 @@ def build_datasets(cfg):
     n_bands = img.shape[2]
     print(f"Loaded {cfg.dataset}: shape={img.shape}, bands={n_bands}")
 
-    srf_weights, srf_band_names, hsi_wavelengths, n_select_bands = _build_srf(
-        cfg, n_bands
-    )
+    (
+        srf_weights,
+        srf_band_names,
+        hsi_wavelengths,
+        n_select_bands,
+        coverage_diagnostics,
+    ) = _build_srf(cfg, n_bands)
 
     degradation_operator = build_hsi_degradation(cfg)
     progressive_degradation = build_progressive_degradation(
@@ -431,6 +456,7 @@ def build_datasets(cfg):
         "msi_mode": getattr(cfg, "msi_mode", "uniform"),
         "srf_weights": srf_weights,
         "srf_band_names": srf_band_names,
+        "srf_coverage_diagnostics": coverage_diagnostics,
         "hsi_wavelengths": hsi_wavelengths,
     }
 
