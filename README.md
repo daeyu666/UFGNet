@@ -1,94 +1,42 @@
-# S2Diff: HSI Super-Resolution Experimental Scaffold
+# UFGNet / HSI Super-Resolution Experiments
 
-当前仓库用于 HSI-MSI Fusion 超分实验。基础代码提供数据读取、SRF、指标、可切换 LR-HSI 退化和渐进物理退化轨迹；具体扩散网络尚未接入。
+当前仓库用于 HSI-MSI Fusion 超分复现与对比实验。仓库保留 3 种 LR-HSI 退化方式，并在 `EMR-Diff/` 中加入 EMR-Diff 对比实现。
 
-## 当前代码
+## 当前统一对比协议
 
-| 文件/目录 | 说明 |
-|---|---|
-| `data_loader.py` | HSI 读取、patch 构建、LR-HSI 退化、HR-MSI 构建、DataLoader |
-| `degradations/` | Bicubic、Gaussian+Bicubic、Physical 退化及 progressive trajectory |
-| `check_degradation_trajectory.py` | 在接网络前检查各时间步退化状态 |
-| `losses.py` | 当前已实现 SAMLoss；其他一致性损失将在模型阶段补充 |
-| `metrics.py` | PSNR / RMSE / SAM / ERGAS / SSIM / CC |
-| `srf_utils.py` | SRF 加载、插值、离散积分权重、HSI→MSI |
-| `config.py` | 数据、退化和训练通用配置 |
-| `main.py` | 检查数据与退化配置是否正确串联 |
-
-## Degradation v1
-
-### 1. LR-HSI 退化模式
-
-三种退化通过 `--degradation_mode` 切换：
-
-- `bicubic`：纯 Bicubic 下采样；
-- `gaussian_bicubic`：Gaussian blur + Bicubic，下采样基线；
-- `physical`：Gaussian PSF/MTF + detector area averaging + sampling，作为当前主实验退化。
-
-新实验默认：
+当前阶段先只使用常规退化，不使用 physical 退化：
 
 ```text
-degradation_mode = physical
 scale_ratio = 4
-mtf_nyquist = 0.2
-psf_truncate = 3.0
+degradation_mode = gaussian_bicubic
+degradation_kernel_size = 5
+degradation_sigma = 2.0
+n_select_bands = 8
+msi_mode = uniform
 ```
 
-旧 `make_lr_hsi()` 在未传入退化算子时仍保持 Gaussian+Bicubic 概念基线，避免旧脚本静默改变结果。
-
-### 2. Progressive degradation
-
-默认：
+即：
 
 ```text
-T = 12
-scale stages = 1 -> 2 -> 4
-lift = auto
+HR-HSI
+  -> 5x5 Gaussian blur, sigma=2
+  -> Bicubic downsampling x4
+  -> LR-HSI
 ```
 
-`auto` 会解析为：
+PaviaU、Houston13、Chikusei 当前均使用 8-band HR-MSI。
 
-- `physical` → `normalized_adjoint`；
-- `bicubic / gaussian_bicubic` → `bilinear`。
-
-物理模式下：
-
-```math
-D_t = B_{r_t} P_t
-```
-
-```math
-\tilde D_t = U_t D_t
-```
-
-逆过程预留更新：
-
-```math
-x_{t-1}=x_t+\tilde D_{t-1}(\hat X_0)-\tilde D_t(\hat X_0)
-```
-
-所有 diffusion state 均位于 HR 网格。
-
-### 3. 数据端与扩散终点闭合
-
-`build_datasets()` 只构建一个 `degradation_operator`，训练集、测试集和 `ProgressiveDegradation` 共用该对象。
-
-必须满足：
-
-```math
-D_T(X)=Y_{LR-HSI}
-```
-
-对应测试位于：
+数据设置：
 
 ```text
-tests/test_degradation_closure.py
-tests/test_data_pipeline_degradation.py
+train patch = 64x64
+stride = 32
+test size = 128x128
 ```
 
-## 退化轨迹 sanity check
+## 数据
 
-先把原始 HSI 放入：
+原始 HSI 放在：
 
 ```text
 data/raw/PaviaU.mat
@@ -96,79 +44,94 @@ data/raw/Houston13.mat
 data/raw/Chikusei.mat
 ```
 
-### Physical 主实验轨迹
+## 主要文件
 
-```bash
-python check_degradation_trajectory.py \
-  --dataset PaviaU \
-  --mode physical \
-  --lift_mode auto \
-  --crop_size 128 \
-  --scale_ratio 4 \
-  --total_steps 12 \
-  --mtf_nyquist 0.2
-```
+| 文件/目录 | 说明 |
+|---|---|
+| `config.py` | 当前统一实验配置 |
+| `data_loader.py` | HSI 读取、归一化、patch、LR-HSI 与 HR-MSI 构建 |
+| `degradations/` | Bicubic、Gaussian+Bicubic、Physical 三种退化 |
+| `metrics.py` | PSNR / RMSE / SAM / ERGAS / SSIM / CC |
+| `srf_utils.py` | SRF 相关工具，后续真实 SRF 实验继续保留 |
+| `EMR-Diff/` | EMR-Diff 开源代码及 UFGNet 协议适配 |
 
-### Gaussian+Bicubic 对照
+## 3 种 LR-HSI 退化
 
-```bash
-python check_degradation_trajectory.py \
-  --dataset PaviaU \
-  --mode gaussian_bicubic \
-  --lift_mode auto \
-  --crop_size 128 \
-  --scale_ratio 4 \
-  --total_steps 12 \
-  --legacy_sigma 2.0 \
-  --legacy_kernel 5
-```
+仓库仍保留：
 
-### Bicubic 对照
+- `bicubic`：纯 Bicubic 下采样；
+- `gaussian_bicubic`：Gaussian blur + Bicubic；
+- `physical`：Gaussian PSF/MTF + detector area averaging + sampling。
 
-```bash
-python check_degradation_trajectory.py \
-  --dataset PaviaU \
-  --mode bicubic \
-  --lift_mode auto \
-  --crop_size 128 \
-  --scale_ratio 4 \
-  --total_steps 12
-```
+当前对比实验固定使用 `gaussian_bicubic`。后续切换其他退化时再单独进行对应实验。
 
-脚本逐时间步输出：
-
-```text
-t, scale, strength, scale_transition, step_l1,
-PSNR, SAM(deg), mean, std, HF ratio
-```
-
-重点先检查：
-
-1. `terminal_closure_max_abs_error` 是否接近 0；
-2. `mean` 是否在 1→2→4 切换时出现不合理幅值跳变；
-3. `step_l1` 在尺度切换点是否远高于邻近时间步；
-4. PSNR、HF ratio 是否总体随退化逐渐下降；
-5. SAM 是否保持合理，不出现由 lift 人为造成的突变。
-
-输出保存在：
-
-```text
-outputs/degradation_trajectory/
-```
-
-## HSI-MSI Fusion 数据
-
-正式融合实验建议使用真实 SRF：
+## 检查当前数据协议
 
 ```bash
 python main.py \
   --dataset PaviaU \
-  --degradation_mode physical \
-  --msi_mode srf
+  --degradation_mode gaussian_bicubic \
+  --degradation_sigma 2.0 \
+  --degradation_kernel_size 5 \
+  --scale_ratio 4 \
+  --n_select_bands 8 \
+  --msi_mode uniform
 ```
 
-仓库已经包含 PaviaU、Houston13、Chikusei 的波长文件和 WorldView-2 SRF CSV；原始 HSI `.mat` 不提交到仓库。
+Chikusei：
 
-## 当前阶段
+```bash
+python main.py \
+  --dataset Chikusei \
+  --degradation_mode gaussian_bicubic \
+  --degradation_sigma 2.0 \
+  --degradation_kernel_size 5 \
+  --scale_ratio 4 \
+  --n_select_bands 8 \
+  --msi_mode uniform
+```
 
-当前先完成退化轨迹与数据闭合验证。只有真实 HSI 上的 trajectory sanity check 通过后，再接 clean HR-HSI predictor 和扩散训练循环；MSI 高频可迁移引导留到创新点 1 稳定后加入。
+## EMR-Diff 对比实验
+
+EMR-Diff 不再使用其原始固定 `256x256 / x8 / 31+3 channels` 数据协议。当前比较入口直接复用根目录 UFGNet 数据管线，使 LR-HSI、HR-MSI、GT、归一化、训练 patch 和测试区域一致。
+
+训练 PaviaU：
+
+```bash
+cd EMR-Diff
+python Train.py --dataset PaviaU
+```
+
+训练 Chikusei：
+
+```bash
+cd EMR-Diff
+python Train.py --dataset Chikusei
+```
+
+快速单轮检查：
+
+```bash
+python Train.py --dataset PaviaU --epochs 1 --test_frequency 1
+```
+
+测试：
+
+```bash
+python Test.py --dataset PaviaU
+python Test.py --dataset Chikusei
+```
+
+EMR-Diff 的状态通道按数据集自动计算：
+
+```text
+state_channels = HSI_channels + 8
+PaviaU   = 103 + 8 = 111
+Chikusei = 128 + 8 = 136
+```
+
+模型内部原先写死的 34 通道分组卷积、GroupNorm、`cuda:1`、x8 上采样以及 Harvard 路径均已改为动态配置或数据尺寸驱动。
+
+## 物理退化与渐进退化
+
+Physical 与 progressive degradation 代码仍保留，用于后续独立实验，不参与当前 EMR-Diff 常规退化对比。原有 trajectory sanity check、终点闭合检查与相关测试也继续保留。
