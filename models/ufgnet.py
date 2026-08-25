@@ -8,11 +8,15 @@ Implements:
 The spatial degradation operator is injected at forward time so the network can reuse
 exactly the same Gaussian+Bicubic operator that generated the LR-HSI observations.
 
-Source-faithfulness note:
-Fig. 4 schematically draws a phase-domain cosine/sine convolution block, while
-Algorithm 1 and Eq. (13) explicitly define phase-only inverse FFT followed by a
-3x3 C_phase mapping. The executable baseline follows the explicit algorithm/equation
-rather than silently inventing an undocumented fusion of the two descriptions.
+Source-faithfulness notes:
+- Fig. 4 schematically draws a phase-domain cosine/sine convolution block, while
+  Algorithm 1 and Eq. (13) explicitly define phase-only inverse FFT followed by a
+  3x3 C_phase mapping. The executable baseline follows the explicit algorithm/equation.
+- Eq. (20) defines K as the TOTAL number of deformable sampling elements and gives
+  K=9 for a 3x3 kernel. Sec. IV-F later reuses K as a "kernel size" varied from
+  3 to 9, with K=7 optimal. Because those two K definitions cannot be mapped to a
+  unique standard DConv shape, the executable DConv defaults to the explicitly
+  illustrated 3x3 grid rather than silently interpreting K=7 as a 7x7 kernel.
 """
 
 from __future__ import annotations
@@ -198,16 +202,13 @@ class FrequencyAwareSpectralAttention(nn.Module):
         correlation = torch.matmul(q, q.transpose(1, 2))
 
         # Eq. (17): P_ij = exp(-||f_i-f_j||_2^2 / tau), where f is obtained
-        # by global spatial pooling of F_spe.  For scalar per-band pooled values,
+        # by global spatial pooling of F_spe. For scalar per-band pooled values,
         # ||f_i-f_j||_2^2 reduces to the squared scalar difference.
         f = spectral_guidance.mean(dim=(-2, -1))
         dist2 = (f.unsqueeze(2) - f.unsqueeze(1)).pow(2)
         physical_prior = torch.exp(-dist2 / self.tau)
 
         # Eq. (18) places the product (Q_i Q_j^T) * P_ij INSIDE the exponent.
-        # Therefore the correct numerically-stable implementation is simply a
-        # softmax over correlation * physical_prior, not softmax(log-correlation
-        # plus log-prior) and not exp(correlation) * P_ij.
         fused_similarity = correlation * physical_prior
         affinity = torch.softmax(fused_similarity, dim=-1)
 
@@ -281,7 +282,7 @@ def _fallback_modulated_deform_conv2d(
 class SpatialDifferentialOptimizationBranch(nn.Module):
     """SpaDOB with F_spa-driven modulated deformable convolution."""
 
-    def __init__(self, channels: int, kernel_size: int = 7) -> None:
+    def __init__(self, channels: int, kernel_size: int = 3) -> None:
         super().__init__()
         if kernel_size < 1 or kernel_size % 2 == 0:
             raise ValueError("kernel_size must be a positive odd integer")
@@ -290,8 +291,9 @@ class SpatialDifferentialOptimizationBranch(nn.Module):
         self.padding = kernel_size // 2
         k_total = kernel_size * kernel_size
 
-        # C_offset itself is explicitly 3x3 in Eq. (20).  Its OUTPUT dimensionality
-        # is 3*K_total: 2*K_total offsets plus K_total modulation masks.
+        # C_offset itself is explicitly 3x3 in Eq. (20). Its output dimensionality
+        # is 3*K_total for a square-grid implementation: 2*K_total offsets plus
+        # K_total modulation masks. The paper explicitly illustrates K_total=9.
         self.offset_estimator = nn.Conv2d(
             channels, 3 * k_total, kernel_size=3, padding=1
         )
@@ -339,7 +341,7 @@ class CrossComplementaryRefinementModule(nn.Module):
         self,
         hsi_channels: int,
         fasa_tau: float = 1.0,
-        deform_kernel_size: int = 7,
+        deform_kernel_size: int = 3,
     ) -> None:
         super().__init__()
         self.spe_dob = FrequencyAwareSpectralAttention(hsi_channels, tau=fasa_tau)
@@ -403,7 +405,7 @@ class UFGNet(nn.Module):
         qiem_regularization: float = 1e-4,
         fasa_tau: float = 1.0,
         spectral_gate_kernel: int = 3,
-        deform_kernel_size: int = 7,
+        deform_kernel_size: int = 3,
     ) -> None:
         super().__init__()
         srf = torch.as_tensor(srf, dtype=torch.float32)
