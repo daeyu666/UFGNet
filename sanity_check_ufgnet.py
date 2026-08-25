@@ -1,6 +1,6 @@
 """One-batch real-data sanity check for the UFGNet reproduction.
 
-Run this before a long training job.  It uses the exact configured dataset
+Run this before a long training job. It uses the exact configured dataset
 operator/SRF, executes QIEM -> FGM -> CCRM, evaluates the unsupervised loss,
 and performs one backward pass while reporting intermediate diagnostics.
 """
@@ -38,6 +38,16 @@ def _param_count(module: torch.nn.Module) -> int:
     return sum(p.numel() for p in module.parameters() if p.requires_grad)
 
 
+def _out_of_range_fraction(x: torch.Tensor, lo: float = 0.0, hi: float = 1.0) -> float:
+    x = x.detach()
+    return float(((x < lo) | (x > hi)).float().mean().item())
+
+
+def _affinity_entropy(affinity: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+    a = affinity.detach().float().clamp_min(eps)
+    return -(a * torch.log(a)).sum(dim=-1)
+
+
 def main() -> None:
     cfg = parse_args()
     print_config(cfg)
@@ -72,6 +82,7 @@ def main() -> None:
     print(f"FGM params={_param_count(model.fgm):,}")
     print(f"CCRM params={_param_count(model.ccrm):,}")
     print("prediction:", _stats(pred))
+    print(f"prediction out-of-[0,1] fraction={_out_of_range_fraction(pred):.8f}")
 
     print("\n[QIEM]")
     print("spatial:", _stats(aux["qiem_spatial"]))
@@ -91,10 +102,21 @@ def main() -> None:
     print("mask:", _stats(aux["mask"]))
     affinity = aux["fasa_affinity"].detach()
     row_sums = affinity.sum(dim=-1)
+    row_max = affinity.max(dim=-1).values
+    entropy = _affinity_entropy(affinity)
+    normalized_entropy = entropy / math.log(max(affinity.shape[-1], 2))
     print("FASA affinity:", _stats(affinity))
     print(
         f"FASA row-sum min={row_sums.min().item():.8f} "
         f"max={row_sums.max().item():.8f}"
+    )
+    print(
+        f"FASA row-max mean={row_max.mean().item():.8f} "
+        f"max={row_max.max().item():.8f}"
+    )
+    print(
+        f"FASA normalized entropy mean={normalized_entropy.mean().item():.8f} "
+        f"min={normalized_entropy.min().item():.8f}"
     )
     if not torch.allclose(row_sums, torch.ones_like(row_sums), atol=1e-5, rtol=1e-5):
         raise RuntimeError("FASA affinity rows do not sum to 1")
@@ -103,6 +125,13 @@ def main() -> None:
     print(f"total={loss.item():.8f}")
     for key, value in parts.items():
         print(f"{key}={float(value.item()):.8f}")
+    weighted_rec = cfg.lambda_rec * float(parts["loss_rec"].item())
+    weighted_sam = cfg.lambda_sam * float(parts["loss_sam"].item())
+    weighted_freq = cfg.lambda_freq * float(parts["loss_freq"].item())
+    print(
+        "weighted contributions: "
+        f"rec={weighted_rec:.8f} sam={weighted_sam:.8f} freq={weighted_freq:.8f}"
+    )
 
     print("\n[gradient norms]")
     print(f"QIEM={_grad_norm(model.qiem):.8g}")
@@ -110,7 +139,7 @@ def main() -> None:
     print(f"CCRM={_grad_norm(model.ccrm):.8g}")
 
     metrics = calc_metrics(pred, gt, scale_ratio=cfg.scale_ratio)
-    print("\n[GT metrics: monitoring only]")
+    print("\n[GT metrics: monitoring only; raw prediction, no metric clipping]")
     for key, value in metrics.items():
         print(f"{key}={value:.8f}")
 
