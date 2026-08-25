@@ -23,7 +23,11 @@ jobs:
           pip install torch --index-url https://download.pytorch.org/whl/cpu
       - name: Run degradation and UFGNet tests
         run: |
-          pytest -q tests/test_degradation_closure.py tests/test_data_pipeline_degradation.py tests/test_ufgnet.py
+          pytest -q \
+            tests/test_degradation_closure.py \
+            tests/test_data_pipeline_degradation.py \
+            tests/test_ufgnet.py \
+            tests/test_ufgnet_data_protocol.py
       - name: Audit UFGNet parameter counts
         run: |
           python audit_ufgnet.py
