@@ -1,272 +1,356 @@
+import glob
 import os
+import random
 from copy import deepcopy
+
 import numpy as np
-import torch
-import tqdm
-import math
-import cv2
-import torch.nn.functional as F
-from arch.BAFUnet import  BAFUNet
-from dataset_loader.dataloader import DataloaderSimpleTest, DataloaderSimpleTrain
-from torch.utils.data import DataLoader
-from torchmetrics.image import *
 import scipy.io as sio
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from tqdm import tqdm
-from EMRDiff import *
-import time
-from thop import profile
 
-def sparse_checkerboard(img,size):
-    b,c,h,w = img.shape
-    img_array = np.array(img.detach().cpu().numpy())
-    result_array = np.zeros_like(img_array)
-    height, width = h,w
-    for i in range(0, height, size):
-        for j in range(0, width, size):
-                result_array[:, :,i, j] = img_array[:, :,i, j]
-    return torch.from_numpy(result_array)
-def pdown(img,size):
-    b,c,h,w = img.shape
-    img_array = np.array(img.detach().cpu().numpy())
-    height, width = h,w
-    new_height = height // size
-    new_width = width // size
-    compact_array = np.zeros((b,c,new_height, new_width), dtype=img_array.dtype)
-    for i in range(0, height, size):
-        for j in range(0, width, size):
-            if i // size < new_height and j // size < new_width:
-                compact_array[:, :, i // size, j // size] = img_array[:,:,i, j]
-    return torch.from_numpy(compact_array)
-def save_checkpoint(model, epoch, data):
-        checkpoint_dir = os.path.join("checkpoints", "{}_{}".format('EMRDIFF', data))
-        model_out_path = os.path.join(checkpoint_dir, "model_epoch_{}.pth.tar".format(epoch))
-        state = {"epoch": epoch, "model": model}
+from arch.BAFUnet import BAFUNet
+from dataset_loader.ufg_adapter import build_ufg_loaders
+from EMRDiff import EMRDIFF, Edge
+from metrics import MetricAverager, calc_metrics
 
-        os.makedirs(checkpoint_dir, exist_ok=True)
-        torch.save(state, model_out_path)
-        #print("Checkpoints saved to {}".format(model_out_path))
+
+EMR_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _sample_or_resize(x, target_hw):
+    """Match the original EMR-Diff point-downsample / bicubic-upsample behavior."""
+    target_h, target_w = int(target_hw[0]), int(target_hw[1])
+    h, w = x.shape[-2:]
+    if (h, w) == (target_h, target_w):
+        return x
+
+    if target_h <= h and target_w <= w and h % target_h == 0 and w % target_w == 0:
+        step_h = h // target_h
+        step_w = w // target_w
+        return x[..., ::step_h, ::step_w][..., :target_h, :target_w]
+
+    return F.interpolate(
+        x,
+        size=(target_h, target_w),
+        mode="bicubic",
+        align_corners=False,
+    )
+
+
+def save_checkpoint(model, optimizer, epoch, dataset, state_channels):
+    checkpoint_dir = os.path.join(
+        EMR_ROOT, "checkpoints", f"EMRDIFF_{dataset}"
+    )
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    model_out_path = os.path.join(
+        checkpoint_dir, f"model_epoch_{epoch}.pth.tar"
+    )
+    torch.save(
+        {
+            "epoch": int(epoch),
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "dataset": dataset,
+            "state_channels": int(state_channels),
+        },
+        model_out_path,
+    )
+    return model_out_path
+
+
+def latest_checkpoint(dataset):
+    checkpoint_dir = os.path.join(
+        EMR_ROOT, "checkpoints", f"EMRDIFF_{dataset}"
+    )
+    paths = glob.glob(os.path.join(checkpoint_dir, "model_epoch_*.pth.tar"))
+    if not paths:
+        raise FileNotFoundError(
+            f"No EMR-Diff checkpoint found for {dataset} in {checkpoint_dir}"
+        )
+
+    def _epoch(path):
+        stem = os.path.basename(path)
+        return int(stem.split("model_epoch_")[-1].split(".pth")[0])
+
+    return max(paths, key=_epoch)
+
+
 class ResShiftTrainer:
     def __init__(self, configs):
         self.configs = configs
-        self.device = torch.device("cuda:1")
-        self.epochs = self.configs.train['epochs']
-        self.num_timesteps = self.configs.diffusion.params.get("steps")
-        self.diffusion_sf = self.configs.diffusion.params.get("sf")
-        self.diffusion_scale_factor = self.configs.diffusion.params.get("scale_factor")
+        self.epochs = int(self.configs.train["epochs"])
+        self.num_timesteps = int(self.configs.diffusion.params.get("steps"))
+        self.diffusion_sf = int(self.configs.diffusion.params.get("sf"))
 
-        self.train_dataloader = self.build_training_dataloader()
-        self.val_dataloader = self.build_val_dataloader()
+        seed = int(self.configs.train.get("seed", 10))
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+
+        requested_device = str(self.configs.train.get("device", "cuda"))
+        if requested_device.startswith("cuda") and not torch.cuda.is_available():
+            requested_device = "cpu"
+        self.device = torch.device(requested_device)
+
+        (
+            self.train_dataloader,
+            self.val_dataloader,
+            self.data_info,
+            self.ufg_cfg,
+        ) = build_ufg_loaders(self.configs)
+
+        self.dataset = str(self.ufg_cfg.dataset)
+        self.hsi_channels = int(self.data_info["n_bands"])
+        self.msi_channels = int(self.data_info["n_select_bands"])
+        self.state_channels = self.hsi_channels + self.msi_channels
+
+        if self.msi_channels != 8:
+            raise ValueError(
+                f"Current EMR-Diff comparison protocol requires 8 MSI bands, got {self.msi_channels}."
+            )
+
+        print(
+            f"[EMR-Diff] dataset={self.dataset}, HSI={self.hsi_channels}, "
+            f"MSI={self.msi_channels}, state={self.state_channels}, "
+            f"scale=x{self.diffusion_sf}, degradation={self.data_info['degradation_mode']}"
+        )
+
+        self._apply_dynamic_channel_config()
         self.build_model()
         self.build_diffusion_model()
+        self.edge_detector = Edge().to(self.device)
         self.setup_optimization()
-        self.psnrall = 0
-        self.samall = 0
-        self.ssimall = 0
-        self.ergasall = 0
-    def setup_optimization(self):
-        self.optimizer = torch.optim.Adam(self.Net.parameters(), lr=self.configs.train.get('lr'))
-    def build_model(self):
-        params = self.configs.model.get('params', dict)
-        self.Net = BAFUNet(**params)
-        self.Net = self.Net.to(self.device)
-    def build_diffusion_model(self):
-        diffusion_opt = self.configs.get('diffusion', dict)
-        self.EMRDIFF = EMRDIFF(diffusion_opt)
-    def build_training_dataloader(self):
-        opt = {}
-        opt['paths'] = self.configs.data.train.params['dir_paths']
-        opt['sf'] = self.configs.diffusion.params.get("sf")
-        opt['gt_size'] = self.configs.data.train.params.get('gt_size')
-        batch_size = self.configs.train.get('batch')[0]
-        num_workers = self.configs.train.get('num_workers')
-        return DataLoader(DataloaderSimpleTrain(opt), batch_size=batch_size, shuffle=True,num_workers=num_workers)
-    def build_val_dataloader(self):
-        opt = {}
-        opt['paths'] = self.configs.data.val.params['dir_paths']
-        opt['sf'] = self.configs.diffusion.params.get("sf")
-        opt['gt_size'] = self.configs.data.train.params.get('gt_size')
-        batch_size = self.configs.train.get('batch')[1]
-        num_workers = self.configs.train.get('num_workers')
-        return DataLoader(DataloaderSimpleTest(opt), batch_size=batch_size, shuffle=False,num_workers=num_workers)
 
+        self.output_dir = os.path.join(
+            EMR_ROOT, "outputs", self.dataset
+        )
+        os.makedirs(self.output_dir, exist_ok=True)
+
+    def _apply_dynamic_channel_config(self):
+        params = self.configs.model.params
+        params.in_channels = self.state_channels
+        params.model_channels = self.state_channels
+        params.out_channels = self.state_channels
+        params.lqrgb_channels = self.state_channels
+        params.rgb_channels = self.msi_channels
+        self.configs.diffusion.params.band_dim = self.hsi_channels
+
+    def setup_optimization(self):
+        self.optimizer = torch.optim.Adam(
+            self.Net.parameters(), lr=float(self.configs.train.get("lr"))
+        )
+
+    def build_model(self):
+        params = dict(self.configs.model.params)
+        self.Net = BAFUNet(**params).to(self.device)
+
+    def build_diffusion_model(self):
+        diffusion_opt = self.configs.get("diffusion", dict)
+        self.EMRDIFF = EMRDIFF(diffusion_opt).to(self.device)
+
+    def _prepare_batch(self, batch):
+        gt = batch["gt"].to(self.device, dtype=torch.float32, non_blocking=True)
+        lq = batch["lr_hsi"].to(
+            self.device, dtype=torch.float32, non_blocking=True
+        )
+        msi = batch["hr_msi"].to(
+            self.device, dtype=torch.float32, non_blocking=True
+        )
+        return gt, lq, msi
+
+    def _pseudo_msi(self, gt):
+        # Faithful generalization of the original code's gt[:, [0,1,2]] pseudo-MSI.
+        # With 8-band comparison input, use the first 8 HSI bands rather than
+        # copying HR-MSI, so the multimodal residual remains non-trivial.
+        if gt.shape[1] < self.msi_channels:
+            raise ValueError(
+                f"HSI has {gt.shape[1]} bands, cannot form {self.msi_channels}-band pseudo-MSI."
+            )
+        return gt[:, : self.msi_channels, :, :]
+
+    def _condition(self, lq, msi, target_hw):
+        lq_scaled = _sample_or_resize(lq, target_hw)
+        msi_scaled = _sample_or_resize(msi, target_hw)
+        return torch.cat((lq_scaled, msi_scaled), dim=1)
+
+    def _x_start(self, gt):
+        return torch.cat((gt, self._pseudo_msi(gt)), dim=1)
+
+    def _multiscale_loss(self, network_output, up_out, x_start, lq, msi):
+        loss_func = nn.L1Loss()
+        hr_condition = self._condition(lq, msi, x_start.shape[-2:])
+        loss = loss_func(network_output + hr_condition, x_start)
+
+        # Original EMR-Diff supervises up_out[2], [4], [6].  Keep those decoder
+        # stages, but derive every condition/target by actual tensor size instead
+        # of assuming native LR is always 1/8 resolution.
+        for index in (2, 4, 6):
+            if index >= len(up_out):
+                continue
+            feature = up_out[index]
+            target_hw = feature.shape[-2:]
+            target = _sample_or_resize(x_start, target_hw)
+            condition = self._condition(lq, msi, target_hw)
+            if feature.shape != target.shape or condition.shape != target.shape:
+                raise RuntimeError(
+                    f"Multi-scale shape mismatch at up_out[{index}]: "
+                    f"feature={tuple(feature.shape)}, condition={tuple(condition.shape)}, "
+                    f"target={tuple(target.shape)}"
+                )
+            loss = loss + loss_func(feature + condition, target)
+        return loss
+
+    def _reconstruct(self, lq, msi):
+        hr_hw = msi.shape[-2:]
+        lq_hr = _sample_or_resize(lq, hr_hw)
+        condition = torch.cat((lq_hr, msi), dim=1)
+        rgb_edge = self.edge_detector(msi)
+
+        indices = list(range(self.num_timesteps))[::-1]
+        noise = torch.randn_like(condition)
+        x_t = self.EMRDIFF.prior_sample(
+            condition, noise, edge_map=rgb_edge
+        )
+
+        self.Net.eval()
+        with torch.no_grad():
+            for t in indices:
+                tt = torch.tensor(
+                    [t] * x_t.shape[0], device=x_t.device, dtype=torch.long
+                )
+                x_pred, _ = self.Net(x_t, msi, lq_hr, tt)
+                x_pred = x_pred + condition
+                noise = torch.randn_like(x_pred)
+                x_t = self.EMRDIFF.inverse_denoise(
+                    x_start=x_pred,
+                    x_t=x_t,
+                    t=tt,
+                    noise=noise,
+                    edge_map=rgb_edge,
+                )
+
+        return x_t[:, : self.hsi_channels, :, :]
+
+    def evaluate(self, save_predictions=False):
+        averager = MetricAverager()
+        for step, batch in enumerate(tqdm(self.val_dataloader, desc="EMR-Diff eval")):
+            gt, lq, msi = self._prepare_batch(batch)
+            prediction = self._reconstruct(lq, msi)
+            metric_values = calc_metrics(
+                prediction, gt, scale_ratio=self.diffusion_sf
+            )
+            averager.update(metric_values)
+
+            print(
+                " ".join(
+                    f"{name}={value:.6f}" for name, value in metric_values.items()
+                )
+            )
+
+            if save_predictions:
+                mat_data = {
+                    "data": prediction.squeeze(0).detach().cpu().numpy(),
+                    "gt": gt.squeeze(0).detach().cpu().numpy(),
+                }
+                sio.savemat(
+                    os.path.join(self.output_dir, f"prediction_{step}.mat"),
+                    mat_data,
+                )
+
+        average = averager.average()
+        print(
+            f"[EMR-Diff:{self.dataset}] "
+            + " ".join(f"{k}={v:.6f}" for k, v in average.items())
+        )
+        return average
 
     def train(self, epoch, verbose):
-        for i in range(epoch):
-            i = i
-            print('epoch: {}'.format(i))
-            for step, [gt, lq, rgb] in enumerate(tqdm(self.train_dataloader)):
+        for epoch_index in range(int(epoch)):
+            self.Net.train()
+            running_loss = 0.0
+            num_batches = 0
+            progress = tqdm(
+                self.train_dataloader,
+                desc=f"EMR-Diff {self.dataset} epoch {epoch_index + 1}",
+            )
 
-                lq_up8 = nn.functional.interpolate(lq, scale_factor=8, mode='bicubic', align_corners=False)
-                lq_up4 = nn.functional.interpolate(lq, scale_factor=4, mode='bicubic', align_corners=False)
-                lq_up2 = nn.functional.interpolate(lq, scale_factor=2, mode='bicubic', align_corners=False)
-                lq_up8 = lq_up8.to(self.device).type(torch.float32)
-                lq_up4 = lq_up4.to(self.device).type(torch.float32)
-                lq_up2 = lq_up2.to(self.device).type(torch.float32)
-                lq = lq.to(self.device).type(torch.float32)
-                rgb = rgb.to(self.device).type(torch.float32)
-                gt = gt.to(self.device).type(torch.float32)
-                lqrgb = torch.cat((lq_up8, rgb), dim=1)
+            for batch in progress:
+                gt, lq, msi = self._prepare_batch(batch)
+                x_start = self._x_start(gt)
+                hr_condition = self._condition(lq, msi, gt.shape[-2:])
+
                 tt = torch.randint(
-                    0, self.num_timesteps,
-                    size=(lq.shape[0],),
-                    device=lq.device,
+                    0,
+                    self.num_timesteps,
+                    size=(gt.shape[0],),
+                    device=self.device,
                 )
-                noise = torch.randn(
-                    size=lqrgb.shape,
-                    device=lq.device,
+                noise = torch.randn_like(hr_condition)
+
+                self.optimizer.zero_grad(set_to_none=True)
+                x_t = self.EMRDIFF.forward_addnoise(
+                    x_start=x_start,
+                    y=hr_condition,
+                    t=tt,
+                    noise=noise,
+                    rgb_hr=msi,
                 )
-                band = [0, 1, 2]
-                self.optimizer.zero_grad()
-                p_MSI = gt[:, band, :, :]
-                x_start = torch.cat((gt,p_MSI), dim=1)
-                x_t = self.EMRDIFF.forward_addnoise(x_start=x_start, y=lqrgb, t=tt, noise=noise,
-                                                                    rgb_hr=rgb)
-                network_output, up_out = self.Net(x_t, rgb, lq_up8, tt)
-                loss_func = nn.L1Loss()
-                rgb_down8 = pdown(rgb, 8).to(self.device)
-                rgb_down4 = pdown(rgb, 4).to(self.device)
-                rgb_down2 = pdown(rgb, 2).to(self.device)
-                x_down8 = pdown(x_start, 8).to(self.device)
-                x_down4 = pdown(x_start, 4).to(self.device)
-                x_down2 = pdown(x_start, 2).to(self.device)
-                lqrgb_64 = torch.cat((lq, rgb_down8), dim=1)
-                lqrgb_128 = torch.cat((lq_up2, rgb_down4), dim=1)
-                lqrgb_256 = torch.cat((lq_up4, rgb_down2), dim=1)
-                loss1 = loss_func(network_output + lqrgb, x_start)
-                loss2 = loss_func(up_out[2] + lqrgb_64, x_down8)
-                loss3 = loss_func(up_out[4] + lqrgb_128, x_down4)
-                loss4 = loss_func(up_out[6] + lqrgb_256, x_down2)
-                loss = loss1 + loss3 + loss4 + loss2
+                lq_hr = _sample_or_resize(lq, gt.shape[-2:])
+                network_output, up_out = self.Net(
+                    x_t, msi, lq_hr, tt
+                )
+                loss = self._multiscale_loss(
+                    network_output, up_out, x_start, lq, msi
+                )
                 loss.backward()
                 self.optimizer.step()
 
-            if (i + 1) % verbose == 0:
-                img_index = 0
-                psnr_sum = 0
-                ssim_sum = 0
-                sam_sum = 0
-                ergas_sum = 0
-                for step, [gt, lq, rgb] in enumerate(tqdm(self.val_dataloader)):
-                    lq_up8 = nn.functional.interpolate(lq, scale_factor=8, mode='bicubic', align_corners=False)
-                    lq_up8 = lq_up8.to(self.device).type(torch.float32)
-                    rgb = rgb.to(self.device).type(torch.float32)
-                    gt = gt.to(self.device).type(torch.float32)
-                    lqrgb = torch.cat((lq_up8, rgb), dim=1)
-                    edgeget = Edge()
-                    rgb_edge = edgeget(rgb)
-                    indices = list(range(self.num_timesteps))[::-1]
-                    noise = torch.randn_like(lqrgb)
-                    x_t = self.EMRDIFF.prior_sample(lqrgb, noise,edge_map=rgb_edge)
-                    psnr = PeakSignalNoiseRatio().to(self.device)
-                    sam = SpectralAngleMapper().to(self.device)
-                    ssim = MultiScaleStructuralSimilarityIndexMeasure().to(self.device)
-                    ergas = ErrorRelativeGlobalDimensionlessSynthesis().to(self.device)
-                    results = []
-                    for t in indices:
-                        tt = torch.tensor([t] * x_t.shape[0], device=x_t.device)
-                        with torch.no_grad():
-                            lqrgb = torch.cat((lq_up8, rgb), dim=1)
-                            x_pred,_ = self.Net(x_t, rgb, lq_up8, tt)
-                            x_pred = x_pred + lqrgb
-                            noise = torch.randn_like(x_pred)
-                            x_t = self.EMRDIFF.inverse_denoise(x_start=x_pred, x_t=x_t, t=tt,noise=noise,edge_map=rgb_edge)#
-                            results.append(deepcopy(x_t))
+                running_loss += float(loss.item())
+                num_batches += 1
+                progress.set_postfix(loss=f"{loss.item():.6f}")
 
-                    for j in range(len(results)):
-                        img = results[j]
-                        results[j] = img.clamp(min=-1.0, max=1.0)
-                    results.append(lq)
-                    final_prediction = results[-2]
-                    band_p = self.configs.model.params.get('lqrgb_channels', dict)
-                    final_prediction = final_prediction[:,0:band_p-3,:,:]
-                    psnr_v = psnr(final_prediction, gt).item()
-                    ssim_v = ssim(final_prediction, gt).item()
-                    sam_v = sam(final_prediction, gt).item()
-                    ergas_v = ergas(final_prediction, gt).item()
-                    print('PSNR: {:.4f}, ssim: {:.4f}, sam: {:.4f}, ergas:{:.4f}.'.format(psnr_v, ssim_v, sam_v, ergas_v))
-                    mat_data = {'data': final_prediction.squeeze(0).detach().cpu().numpy()}
-                    sio.savemat(f'xiaorong/{img_index}.mat', mat_data)
-                    img_index += 1
-                    psnr_sum += psnr_v
-                    ssim_sum += ssim_v
-                    sam_sum += sam_v
-                    ergas_sum += ergas_v
-                save_checkpoint(self.Net, i + 1,'harvard')
-                print('Average PSNR: {:.4f}, ssim: {:.4f}, sam: {:.4f}, ergas:{:.4f}.'.format(psnr_sum / img_index,
-                                                                                          ssim_sum / img_index,
-                                                                                          sam_sum / img_index,
-                                                                                          ergas_sum / img_index))
-                    
-    def test(self):
-        img_index = 0
-        psnr1 = 0
-        ssim1 = 0
-        sam1 = 0
-        ergas1 = 0
-        for step, [gt, lq1, rgb] in enumerate(tqdm(self.val_dataloader)):
-            lq = nn.functional.interpolate(lq1, scale_factor=8, mode='bicubic', align_corners=False)
-            lq = lq.to(self.device).type(torch.float32)
-            rgb = rgb.to(self.device).type(torch.float32)
-            edgeget = Edge()
-            rgb_edge = edgeget(rgb)
-            rgb_edge = rgb_edge.to(self.device).type(torch.float32)
-            gt = gt.to(self.device).type(torch.float32)
-            band_p = [0, 1, 2]
-            p_MSI = gt[:, band_p, :, :]
-            lqrgb = torch.cat((lq, rgb), dim=1)
-            model = self.Net
-            checkpoint = torch.load('/home/yaost/PycharmProjects/EMR-Diff/checkpoints/EMRDIFF_harvard/model_epoch_1.pth.tar', weights_only=False)
-            model.load_state_dict(checkpoint['model'].state_dict())
-            t = torch.tensor([1]).to(self.device)
-            model.eval()
+            mean_loss = running_loss / max(num_batches, 1)
+            print(
+                f"[EMR-Diff:{self.dataset}] epoch={epoch_index + 1} "
+                f"train_loss={mean_loss:.6f}"
+            )
 
-            model_copy = deepcopy(model)
-            model_copy.eval()
-            flops, params = profile(model_copy, inputs=(lqrgb,lq,rgb,t), verbose=False)
-            print(f'FLOPs: {flops}')
-            print(f'Params: {params}')
-            del model_copy
+            if (epoch_index + 1) % int(verbose) == 0:
+                self.evaluate(save_predictions=False)
+                path = save_checkpoint(
+                    self.Net,
+                    self.optimizer,
+                    epoch_index + 1,
+                    self.dataset,
+                    self.state_channels,
+                )
+                print(f"checkpoint={path}")
 
-            lqrgb = torch.cat((lq, rgb), dim=1)
-            band_p = self.configs.model.params.get('lqrgb_channels', dict)
-            indices = list(range(self.num_timesteps))[::-1]
-            noise = torch.randn_like(lqrgb)
-            x_t = self.EMRDIFF.prior_sample(lqrgb, noise, edge_map=rgb_edge)
-            psnr = PeakSignalNoiseRatio().to(self.device)
-            sam = SpectralAngleMapper().to(self.device)
-            ssim = MultiScaleStructuralSimilarityIndexMeasure().to(self.device)
-            ergas = ErrorRelativeGlobalDimensionlessSynthesis().to(self.device)
-            results = []
-            #start_time = time.time()
-            for t in indices:
-                tt = torch.tensor([t] * x_t.shape[0], device=x_t.device)
-                with torch.no_grad():
-                    lrrgb = torch.cat((lq, rgb), dim=1)
-                    x_pred, _ = model(x_t, rgb, lq, tt)
-                    x_pred = x_pred + lrrgb
-                    noise = torch.randn_like(x_pred)
-                    x_t = self.EMRDIFF.inverse_denoise(x_start=x_pred, x_t=x_t, t=tt,
-                                                                       noise=noise, edge_map=rgb_edge)
-                    results.append(deepcopy(x_t))
-            #Ours_time = time.time() - start_time
-            #print(Ours_time)
-            for i in range(len(results)):
-                img = results[i]
-                results[i] = img.clamp(min=-1.0, max=1.0)
-            results.append(lq)
-            final_prediction = results[-2]  # 因为最后一个是lq2，所以取倒数第二个
-            final_prediction = final_prediction[:, 0:band_p - 3, :, :]
-            psnr_v = psnr(final_prediction, gt).item()
-            ssim_v  = ssim(final_prediction, gt).item()
-            sam_v  = sam(final_prediction, gt).item()
-            ergas_v  = ergas(final_prediction, gt).item()
-            print('PSNR: {:.4f}, ssim: {:.4f}, sam: {:.4f}, ergas:{:.4f}.'.format(psnr_v , ssim_v , sam_v , ergas_v ))
-            psnr1 += psnr_v 
-            ssim1 += ssim_v 
-            sam1 += sam_v 
-            ergas1 += ergas_v 
-            mat_data = {'data': final_prediction.squeeze(0).detach().cpu().numpy()}
-            sio.savemat(f'xiaorong/{img_index}.mat', mat_data)
-            img_index += 1
-        print('Average PSNR: {:.4f}, ssim: {:.4f}, sam: {:.4f}, ergas:{:.4f}.'.format(psnr1/img_index, ssim1/img_index, sam1/img_index, ergas1/img_index))
+    def load_checkpoint(self, checkpoint_path=None):
+        checkpoint_path = checkpoint_path or latest_checkpoint(self.dataset)
+        checkpoint = torch.load(
+            checkpoint_path,
+            map_location=self.device,
+            weights_only=False,
+        )
+        if "model_state_dict" in checkpoint:
+            self.Net.load_state_dict(checkpoint["model_state_dict"])
+        elif "model" in checkpoint:
+            # Backward compatibility with the original repository checkpoint format.
+            self.Net.load_state_dict(checkpoint["model"].state_dict())
+        else:
+            raise KeyError(
+                f"Unsupported checkpoint format: {checkpoint_path}"
+            )
+        print(f"loaded checkpoint={checkpoint_path}")
+        return checkpoint_path
 
+    def test(self, checkpoint_path=None):
+        self.load_checkpoint(checkpoint_path)
+        parameter_count = sum(p.numel() for p in self.Net.parameters())
+        print(f"Params: {parameter_count}")
+        return self.evaluate(save_predictions=True)
