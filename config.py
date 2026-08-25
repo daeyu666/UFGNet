@@ -55,6 +55,12 @@ class TrainConfig:
     srf_min_coverage_ratio: float = 0.90
     srf_coverage_policy: str = "filter"
 
+    # PaviaU spectral protocol. ``native103`` keeps the standard public cube
+    # intact and maps IKONOS4 onto the nominal 430-860 nm support. ``fusion93``
+    # reproduces the HySure/UFGNet-style 103->93 benchmark crop by dropping the
+    # first ten channels before observation simulation.
+    pavia_spectral_protocol: str = "native103"
+
     epochs: int = 300
     batch_size: int = 1
     num_workers: int = 0
@@ -148,6 +154,10 @@ def validate_config(cfg: TrainConfig):
         raise ValueError("srf_min_coverage_ratio must lie in [0, 1]")
     if cfg.srf_coverage_policy not in {"off", "filter", "error"}:
         raise ValueError("srf_coverage_policy must be one of: off, filter, error")
+    if cfg.pavia_spectral_protocol not in {"native103", "fusion93"}:
+        raise ValueError(
+            "pavia_spectral_protocol must be one of: native103, fusion93"
+        )
     if cfg.ufg_rank < 1:
         raise ValueError("ufg_rank must be >= 1")
     if cfg.ufg_qiem_regularization <= 0:
@@ -234,6 +244,16 @@ def parse_args(argv: Optional[List[str]] = None):
         default="filter",
         choices=["off", "filter", "error"],
         help="How to handle requested SRF bands below the physical overlap threshold.",
+    )
+    parser.add_argument(
+        "--pavia_spectral_protocol",
+        type=str,
+        default="native103",
+        choices=["native103", "fusion93"],
+        help=(
+            "PaviaU spectral handling: native103 keeps the standard 103-band cube; "
+            "fusion93 drops the first 10 channels before simulation."
+        ),
     )
 
     parser.add_argument("--epochs", type=int, default=300)
