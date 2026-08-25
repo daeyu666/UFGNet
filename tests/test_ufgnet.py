@@ -1,7 +1,7 @@
 import torch
 
 from degradations import build_degradation
-from losses import UFGNetLoss
+from losses import SAMLoss, UFGNetLoss
 from models import (
     FrequencyAwareSpectralAttention,
     UFGNet,
@@ -12,6 +12,22 @@ from models import (
 def _normalized_srf(msi_channels: int, hsi_channels: int) -> torch.Tensor:
     srf = torch.rand(msi_channels, hsi_channels)
     return srf / srf.sum(dim=1, keepdim=True).clamp_min(1e-8)
+
+
+def test_sam_matches_paper_equation_24():
+    eps = 1e-8
+    pred = torch.tensor([[[[1.0]], [[2.0]], [[3.0]]]])
+    target = torch.tensor([[[[2.0]], [[1.0]], [[4.0]]]])
+    loss = SAMLoss(eps=eps)(pred, target)
+
+    dot = torch.sum(pred * target, dim=1)
+    pred_norm = torch.linalg.vector_norm(pred, ord=2, dim=1)
+    target_norm = torch.linalg.vector_norm(target, ord=2, dim=1)
+    expected_cos = dot / (pred_norm * target_norm + eps)
+    expected_cos = torch.clamp(expected_cos, -1.0 + eps, 1.0 - eps)
+    expected = torch.acos(expected_cos).mean()
+
+    assert torch.allclose(loss, expected, atol=1e-7, rtol=1e-7)
 
 
 def test_fasa_matches_paper_equation_18():
