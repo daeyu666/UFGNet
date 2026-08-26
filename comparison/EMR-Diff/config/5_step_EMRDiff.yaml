@@ -26,7 +26,7 @@ model:
 
 data:
   dataset: PaviaU
-  data_root: ../data/raw
+  data_root: ../../data/raw
   patch_size: 64
   stride: 32
   test_size: 128
