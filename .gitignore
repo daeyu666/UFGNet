@@ -15,3 +15,5 @@ data/raw/*
 !data/raw/.gitkeep
 data/processed/
 checkpoints/
+comparison/*/checkpoints/
+comparison/*/outputs/
