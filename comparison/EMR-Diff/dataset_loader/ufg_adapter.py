@@ -3,7 +3,7 @@ import sys
 
 
 EMR_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-REPO_ROOT = os.path.dirname(EMR_ROOT)
+REPO_ROOT = os.path.dirname(os.path.dirname(EMR_ROOT))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
@@ -47,8 +47,8 @@ def build_ufg_loaders(configs):
     )
     cfg.srf_coverage_policy = str(configs.data.get("srf_coverage_policy", "filter"))
 
-    # EMR-Diff is normally launched from its own subdirectory, so use absolute
-    # repository paths for the shared SRF and wavelength files.
+    # EMR-Diff is launched from comparison/EMR-Diff, so shared data/SRF files
+    # are resolved against the actual repository root.
     cfg.wavelength_root = os.path.join(REPO_ROOT, "data", "wavelengths")
     explicit_wavelength = str(configs.data.get("wavelength_path", ""))
     if explicit_wavelength:
@@ -58,9 +58,6 @@ def build_ufg_loaders(configs):
             else os.path.abspath(os.path.join(EMR_ROOT, explicit_wavelength))
         )
     else:
-        # Leave empty so the shared UFGNet loader resolves the formal profile.
-        # For PaviaU after 103->93 preprocessing this becomes the benchmark
-        # nominal 430-860 nm / 93-band IKONOS mapping.
         cfg.wavelength_path = ""
 
     explicit_srf = str(configs.data.get("srf_path", ""))
