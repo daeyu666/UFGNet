@@ -1,6 +1,6 @@
 # UFGNet / HSI Super-Resolution Experiments
 
-当前仓库用于 HSI-MSI Fusion 超分复现与对比实验。主线包含 UFGNet 复现、`comparison/` 下的对比方法实现以及 3 种 LR-HSI 退化方式。
+当前仓库专门用于 UFGNet 的 HSI-MSI Fusion 超分复现与主线实验，并保留 3 种 LR-HSI 退化方式。对比实验已迁移到独立仓库 `daeyu666/comparison_experiments`，不再把其他模型、权重和对比结果放在本仓库中。
 
 ## 当前 UFGNet 复现协议
 
@@ -135,50 +135,22 @@ data/raw/Chikusei.mat
 | `srf_utils.py` | 真实 SRF 插值、覆盖校验、离散积分权重 |
 | `audit_srf_coverage.py` | 数据集与真实 SRF 物理覆盖审计 |
 | `audit_ufgnet.py` | 论文参数量与结构歧义审计 |
-| `comparison/` | 所有对比实验的统一存放目录 |
-| `comparison/EMR-Diff/` | EMR-Diff 对比实现、协议适配、权重与结果目录 |
 
-## 对比实验目录规范
+## 对比实验已迁移
 
-所有对比方法统一放入：
+所有对比方法统一放入独立仓库：
 
 ```text
-comparison/<Method>/
+daeyu666/comparison_experiments
+└── comparison/
+    ├── EMR-Diff/
+    │   ├── checkpoints/
+    │   ├── outputs/
+    │   └── logs/
+    └── <OtherMethod>/
 ```
 
-每个方法保持自己的代码、配置和实验产物，不再把对比实验文件散放在仓库根目录。统一约定：
-
-```text
-comparison/<Method>/checkpoints/   # 该方法的模型权重
-comparison/<Method>/outputs/       # 该方法的预测、指标和实验结果
-```
-
-不同对比方法可以共享仓库根目录的数据、退化算子、SRF 和评价指标实现，但权重和实验输出必须保存在自己的方法目录中。`checkpoints/` 与 `outputs/` 中的生成内容默认由 `.gitignore` 忽略。新增方法时直接增加新的 `comparison/<Method>/` 子目录，不为每个对比实验额外创建 Git 分支。详细规则见 `comparison/README.md`。
-
-## EMR-Diff 对比实验
-
-EMR-Diff 当前位于：
-
-```text
-comparison/EMR-Diff/
-```
-
-其 UFGNet 协议适配继续读取与根目录相同的观测模型、退化设置和评价规则；模型权重和实验结果分别保存到该目录自己的 `checkpoints/` 与 `outputs/`。
-
-从仓库根目录训练：
-
-```bash
-python comparison/EMR-Diff/Train.py --dataset PaviaU
-python comparison/EMR-Diff/Train.py --dataset Houston13
-python comparison/EMR-Diff/Train.py --dataset Chikusei
-```
-
-也可以：
-
-```bash
-cd comparison/EMR-Diff
-python Train.py --dataset PaviaU
-```
+后续新增对比方法直接在 `comparison_experiments/comparison/<Method>/` 下建立独立目录，每个方法的模型权重、实验结果和日志均保存在自己的方法目录内。UFGNet 仓库不再保存对比方法实现，避免主线代码继续膨胀。
 
 ## 3 种 LR-HSI 退化
 
